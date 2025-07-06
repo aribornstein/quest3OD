@@ -225,7 +225,7 @@
       if ('gpu' in navigator) ep = 'webgpu'; // WebGPU supported in browser
 
       try {
-        const resp = await fetch('yolo12nms.onnx');
+        const resp = await fetch('yolo12n-int8.onnx');
         if (!resp.ok) {
           outputDiv.innerText = "Failed to fetch yolo12nms.onnx!";
           return;
