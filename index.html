@@ -21,13 +21,23 @@
     </label>
     <label>Conf Threshold: <input id="conf-thresh" type="number" value="0.7" step="0.01" min="0" max="1" style="width:3em"></label>
   </div>
-  <video id="webcam-video" width="320" height="240" autoplay playsinline style="display:none"></video>
-  <canvas id="canvas" width="320" height="320"></canvas>
+  <video id="webcam-video" width="640" height="480" autoplay playsinline style="display:none"></video>
+  <canvas id="canvas" width="640" height="640"></canvas>
   <div id="output"></div>
   <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/ort.min.js"></script>
   <script>
-    const INPUT_SIZE = 320;
-    const coco_labels = [/* ... labels ... */ 'toothbrush'];
+    const INPUT_SIZE = 640;
+    // All 80 COCO labels
+    const coco_labels = [
+      'person','bicycle','car','motorcycle','airplane','bus','train','truck','boat','traffic light',
+      'fire hydrant','stop sign','parking meter','bench','bird','cat','dog','horse','sheep','cow',
+      'elephant','bear','zebra','giraffe','backpack','umbrella','handbag','tie','suitcase','frisbee',
+      'skis','snowboard','sports ball','kite','baseball bat','baseball glove','skateboard','surfboard','tennis racket','bottle',
+      'wine glass','cup','fork','knife','spoon','bowl','banana','apple','sandwich','orange',
+      'broccoli','carrot','hot dog','pizza','donut','cake','chair','couch','potted plant','bed',
+      'dining table','toilet','tv','laptop','mouse','remote','keyboard','cell phone','microwave','oven',
+      'toaster','sink','refrigerator','book','clock','vase','scissors','teddy bear','hair drier','toothbrush'
+    ];
     let session = null;
     let webcamStream = null;
     let realtime = false;
@@ -41,15 +51,43 @@
     const outputDiv = document.getElementById('output');
     const confThreshInput = document.getElementById('conf-thresh');
 
-    // ---- OffscreenCanvas Worker ----
-    const preprocessWorker = new Worker('preprocess-worker.js');
+    // ===== OffscreenCanvas Worker preprocessing =====
+    let preprocessWorker = null;
+    let canUseWorker = !!window.OffscreenCanvas;
+    if (canUseWorker) {
+      preprocessWorker = new Worker('preprocess-worker.js');
+    }
     function preprocessInWorker(imageBitmap, size = INPUT_SIZE) {
       return new Promise(resolve => {
         preprocessWorker.onmessage = function(e) {
           resolve(e.data.floatArray);
         };
-        preprocessWorker.postMessage({ imageBitmap, size });
+        preprocessWorker.postMessage({ imageBitmap, size }, [imageBitmap]);
       });
+    }
+
+    // Synchronous fallback preprocessing (if OffscreenCanvas not available)
+    function preprocessFallback(img, size=INPUT_SIZE) {
+      const canvas = document.createElement('canvas');
+      canvas.width = size; canvas.height = size;
+      const ctx = canvas.getContext('2d');
+      // Letterbox pad
+      const [iw, ih] = [img.naturalWidth || img.width, img.naturalHeight || img.height];
+      const r = Math.min(size / iw, size / ih);
+      const newW = Math.round(iw * r), newH = Math.round(ih * r);
+      const dx = Math.floor((size - newW) / 2), dy = Math.floor((size - newH) / 2);
+      ctx.fillStyle = "#808080";
+      ctx.fillRect(0, 0, size, size);
+      ctx.drawImage(img, dx, dy, newW, newH);
+
+      const imageData = ctx.getImageData(0, 0, size, size).data;
+      const floatArray = new Float32Array(size * size * 3);
+      for (let i = 0; i < size * size; ++i) {
+        floatArray[i] = imageData[i * 4] / 255.0;
+        floatArray[size * size + i] = imageData[i * 4 + 1] / 255.0;
+        floatArray[2 * size * size + i] = imageData[i * 4 + 2] / 255.0;
+      }
+      return floatArray;
     }
 
     // Letterbox scale for overlay
@@ -71,7 +109,7 @@
     function drawBoxes(origImg, detections, canvas) {
       const ctx = canvas.getContext('2d');
       ctx.clearRect(0, 0, canvas.width, canvas.height);
-      const [iw, ih] = [origImg.naturalWidth, origImg.naturalHeight];
+      const [iw, ih] = [origImg.naturalWidth || origImg.width, origImg.naturalHeight || origImg.height];
       const [mw, mh] = [canvas.width, canvas.height];
       const r = Math.min(mw / iw, mh / ih);
       const newW = Math.round(iw * r), newH = Math.round(ih * r);
@@ -113,7 +151,7 @@
 
     document.getElementById('webcam-start').onclick = async () => {
       if (webcamStream) webcamStream.getTracks().forEach(t => t.stop());
-      let constraints = { video: { width: { ideal: 320 } } };
+      let constraints = { video: { width: { ideal: 640 } } };
       const deviceId = webcamSelect.value;
       if (deviceId) constraints.video.deviceId = { ideal: deviceId };
       try {
@@ -151,16 +189,26 @@
         return alert("Start the webcam first!");
       }
       if (webcamVideo.readyState === 4) {
-        // --- OffscreenCanvas Worker Preprocessing ---
+        // --- Preprocess using OffscreenCanvas Worker if possible ---
         const tmp = document.createElement('canvas');
         tmp.width = webcamVideo.videoWidth;
         tmp.height = webcamVideo.videoHeight;
         tmp.getContext('2d').drawImage(webcamVideo, 0, 0, tmp.width, tmp.height);
 
-        const imageBitmap = await createImageBitmap(tmp);
-        const floatArray = await preprocessInWorker(imageBitmap, INPUT_SIZE);
+        let floatArray, imgForDraw;
+        if (canUseWorker && preprocessWorker) {
+          const imageBitmap = await createImageBitmap(tmp);
+          floatArray = await preprocessInWorker(imageBitmap, INPUT_SIZE);
+          imgForDraw = imageBitmap;
+        } else {
+          // Fallback for browsers without OffscreenCanvas or Worker
+          const img = new Image();
+          img.src = tmp.toDataURL();
+          await new Promise(res => img.onload = res);
+          floatArray = preprocessFallback(img, INPUT_SIZE);
+          imgForDraw = img;
+        }
         const tensor = new ort.Tensor('float32', floatArray, [1, 3, INPUT_SIZE, INPUT_SIZE]);
-
         const feeds = {}; feeds[session.inputNames[0]] = tensor;
         const results = await session.run(feeds);
         let output = results[session.outputNames[0]];
@@ -173,13 +221,14 @@
           const x1 = dets[i], y1 = dets[i+1], x2 = dets[i+2], y2 = dets[i+3], score = dets[i+4], class_id = dets[i+5];
           if (score < parseFloat(confThreshInput.value)) continue;
           detections.push({
-            box: scaleCoords(INPUT_SIZE, [imageBitmap.width, imageBitmap.height], [x1, y1, x2, y2]),
+            box: scaleCoords(INPUT_SIZE, [webcamVideo.videoWidth, webcamVideo.videoHeight], [x1, y1, x2, y2]),
             score: score,
             class: class_id,
             label: coco_labels[class_id] || `class${class_id}`
           });
         }
-        drawBoxes(imageBitmap, detections, canvas);
+        canvas.width = INPUT_SIZE; canvas.height = INPUT_SIZE;
+        drawBoxes(imgForDraw, detections, canvas);
         let detectionText = detections.length ?
           detections.map(d => `${d.label}: ${(d.score*100).toFixed(1)}%`).join(', ')
           : 'No objects detected.';
