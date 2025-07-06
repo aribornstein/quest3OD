@@ -303,6 +303,23 @@
       });
     }
 
+    // Scale coordinates from model size to original image size
+    function scaleCoords(modelSize, imgSize, coords) {
+      const [iw, ih] = imgSize;
+      const [mw, mh] = [modelSize, modelSize];
+      const r = Math.min(mw / iw, mh / ih);
+      const newUnpad = [Math.round(iw * r), Math.round(ih * r)];
+      const dw = (mw - newUnpad[0]) / 2;
+      const dh = (mh - newUnpad[1]) / 2;
+      let [x1, y1, x2, y2] = coords;
+      x1 = Math.max(0, (x1 - dw) / r);
+      y1 = Math.max(0, (y1 - dh) / r);
+      x2 = Math.min(iw, (x2 - dw) / r);
+      y2 = Math.min(ih, (y2 - dh) / r);
+      return [x1, y1, x2, y2];
+    }
+
+
     // ==== Camera handling ====
     async function populateWebcams() {
       if (!navigator.mediaDevices?.enumerateDevices) return;
