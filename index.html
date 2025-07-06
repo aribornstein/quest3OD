@@ -12,7 +12,7 @@
   </style>
 </head>
 <body>
-  <h2>YOLOv12 ONNX Browser Webcam Demo (WebGPU optimized, nms=True, letterbox-correct, real-time)</h2>
+  <h2>YOLOv12 ONNX Browser Webcam Demo (WebGPU optimized, nms=True, letterbox-correct, real-time, frame skipping)</h2>
   <div class="controls">
     <label>Webcam:
       <select id="webcam-select"></select>
@@ -40,6 +40,10 @@
     let webcamStream = null;
     let realtime = false;
     let animFrame = null;
+
+    // Frame skipping variables
+    let frameId = 0;
+    const FRAME_SKIP = 2; // Run inference every 2nd frame. Change to 3 for every 3rd, etc.
 
     const webcamVideo = document.getElementById('webcam-video');
     const webcamSelect = document.getElementById('webcam-select');
@@ -151,6 +155,13 @@
     };
 
     async function runWebcamRealtime() {
+      if (!realtime) return;
+      frameId++;
+      if (frameId % FRAME_SKIP !== 0) {
+        animFrame = requestAnimationFrame(runWebcamRealtime);
+        return;
+      }
+
       if (!session) {
         document.getElementById('webcam-realtime').innerText = "Run Realtime";
         return alert("Model not loaded!");
@@ -159,7 +170,6 @@
         document.getElementById('webcam-realtime').innerText = "Run Realtime";
         return alert("Start the webcam first!");
       }
-      if (!realtime) return;
       if (webcamVideo.readyState === 4) {
         const tmp = document.createElement('canvas');
         tmp.width = webcamVideo.videoWidth;
