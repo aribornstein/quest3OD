@@ -2,457 +2,404 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>YOLOv12 ONNX Realtime Webcam Demo</title>
+  <title>YOLOv12 Stereo Depth AR Demo (MobileNetV3)</title>
   <style>
     body { font-family: Arial, sans-serif; padding: 2rem; }
     canvas { border: 1px solid #333; margin-top: 12px; max-width: 100%; }
-    video { border: 1px solid #888; margin-top:8px; max-width:100%; }
+    video { border: 1px solid #888; margin-top:8px; max-width:100%; display:none; }
     .controls { margin-bottom: 16px; }
     #output { margin-top: 16px; }
+    label { margin-right: 1em; }
   </style>
 </head>
 <body>
-  <h2>YOLOv12 ONNX Browser Webcam Demo (WebGPU, OffscreenCanvas worker, SOTA Kalman tracker, anti-flicker, frame skipping)</h2>
+  <h2>YOLOv12 Stereo Depth AR Demo (MobileNetV3-Large Quantized)</h2>
   <div class="controls">
-    <label>Webcam:
-      <select id="webcam-select"></select>
-      <button id="webcam-start">Start Webcam</button>
-      <button id="webcam-realtime">Run Realtime</button>
+    <label>
+      Camera 1:
+      <select id="camera-select-1"></select>
     </label>
-    <label>Conf Threshold: <input id="conf-thresh" type="number" value="0.7" step="0.01" min="0" max="1" style="width:3em"></label>
+    <label>
+      Camera 2:
+      <select id="camera-select-2"><option value="">(none)</option></select>
+    </label>
+    <button id="start-cameras">Start Camera(s)</button>
+    <button id="run-realtime">Run Realtime</button>
+    <label>Conf: <input id="conf-thresh" type="number" value="0.7" step="0.01" min="0" max="1" style="width:3em"></label>
   </div>
-  <video id="webcam-video" width="640" height="480" autoplay playsinline style="display:none"></video>
-  <canvas id="canvas" width="320" height="320"></canvas>
+  <video id="video1" width="640" height="480" autoplay playsinline></video>
+  <video id="video2" width="640" height="480" autoplay playsinline></video>
+  <canvas id="canvas" width="640" height="480"></canvas>
   <div id="output"></div>
   <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/ort.min.js"></script>
   <script>
-    // ======= SETTINGS =======
+    // ===== Settings =====
     const INPUT_SIZE = 320;
+    const MOBILENET_SIZE = 224;
     const FRAME_SKIP = 2;
-    const MAX_DETECTIONS = 10;
-    // =======================
+    const MAX_DETECTIONS = 5;
+    // Focal length (in px) and baseline (in meters) for stereo depth
+    const F = 700, B = 0.06;
+
+    // ===== COCO Labels =====
     const coco_labels = [
       'person','bicycle','car','motorcycle','airplane','bus','train','truck','boat','traffic light',
       'fire hydrant','stop sign','parking meter','bench','bird','cat','dog','horse','sheep','cow',
       'elephant','bear','zebra','giraffe','backpack','umbrella','handbag','tie','suitcase','frisbee',
       'skis','snowboard','sports ball','kite','baseball bat','baseball glove','skateboard','surfboard','tennis racket','bottle',
-      'wine glass','cup','fork','knife','spoon','bowl','banana','apple','sandwich','orange',
-      'broccoli','carrot','hot dog','pizza','donut','cake','chair','couch','potted plant','bed',
-      'dining table','toilet','tv','laptop','mouse','remote','keyboard','cell phone','microwave','oven',
-      'toaster','sink','refrigerator','book','clock','vase','scissors','teddy bear','hair drier','toothbrush'
+      'wine glass','cup','fork','knife','spoon','bowl','banana','apple','sandwich','orange','broccoli','carrot','hot dog','pizza',
+      'donut','cake','chair','couch','potted plant','bed','dining table','toilet','tv','laptop','mouse','remote','keyboard','cell phone',
+      'microwave','oven','toaster','sink','refrigerator','book','clock','vase','scissors','teddy bear','hair drier','toothbrush'
     ];
 
-    let session = null;
-    let webcamStream = null;
-    let realtime = false;
-    let animFrame = null;
-    let frameId = 0;
-    let lastOutputText = "";
-
-    // ==== DOM refs ====
-    const webcamVideo = document.getElementById('webcam-video');
-    const webcamSelect = document.getElementById('webcam-select');
+    // ===== DOM refs =====
+    let stream1 = null, stream2 = null;
+    const video1 = document.getElementById('video1');
+    const video2 = document.getElementById('video2');
     const canvas = document.getElementById('canvas');
     const outputDiv = document.getElementById('output');
-    const confThreshInput = document.getElementById('conf-thresh');
+    let session = null, mobilenetSession = null;
+    let animFrame = null, frameId = 0, realtime = false;
+    let lastOutputText = "";
 
-    // ===== OffscreenCanvas Worker preprocessing =====
-    let preprocessWorker = null;
-    let canUseWorker = !!window.OffscreenCanvas;
-    if (canUseWorker) {
-      preprocessWorker = new Worker('preprocess-worker.js');
-    }
-    function preprocessInWorker(imageBitmap, size = INPUT_SIZE) {
-      return new Promise(resolve => {
-        preprocessWorker.onmessage = function(e) {
-          resolve(e.data.floatArray);
-        };
-        preprocessWorker.postMessage({ imageBitmap, size }, [imageBitmap]);
+    // ===== Camera selection UI =====
+    async function populateCameras() {
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const videoInputs = devices.filter(d => d.kind === 'videoinput');
+      const sel1 = document.getElementById('camera-select-1');
+      const sel2 = document.getElementById('camera-select-2');
+      sel1.innerHTML = '';
+      sel2.innerHTML = '<option value="">(none)</option>';
+      videoInputs.forEach((dev, idx) => {
+        const opt1 = document.createElement('option');
+        opt1.value = dev.deviceId;
+        opt1.text = dev.label || `Camera ${idx+1}`;
+        sel1.appendChild(opt1);
+        const opt2 = opt1.cloneNode(true);
+        sel2.appendChild(opt2);
       });
     }
-    function preprocessFallback(img, size=INPUT_SIZE) {
-      const canvas = document.createElement('canvas');
-      canvas.width = size; canvas.height = size;
-      const ctx = canvas.getContext('2d');
-      const [iw, ih] = [img.naturalWidth || img.width, img.naturalHeight || img.height];
-      const r = Math.min(size / iw, size / ih);
-      const newW = Math.round(iw * r), newH = Math.round(ih * r);
-      const dx = Math.floor((size - newW) / 2), dy = Math.floor((size - newH) / 2);
-      ctx.fillStyle = "#808080";
-      ctx.fillRect(0, 0, size, size);
-      ctx.drawImage(img, dx, dy, newW, newH);
-      const imageData = ctx.getImageData(0, 0, size, size).data;
-      const floatArray = new Float32Array(size * size * 3);
-      for (let i = 0; i < size * size; ++i) {
-        floatArray[i] = imageData[i * 4] / 255.0;
-        floatArray[size * size + i] = imageData[i * 4 + 1] / 255.0;
-        floatArray[2 * size * size + i] = imageData[i * 4 + 2] / 255.0;
-      }
-      return floatArray;
-    }
+    populateCameras();
+    navigator.mediaDevices?.addEventListener?.('devicechange', populateCameras);
 
-    // ==== Tracker logic ====
+    document.getElementById('start-cameras').onclick = async () => {
+      if (stream1) stream1.getTracks().forEach(t => t.stop());
+      if (stream2) stream2.getTracks().forEach(t => t.stop());
+      const id1 = document.getElementById('camera-select-1').value;
+      const id2 = document.getElementById('camera-select-2').value;
+      const constraints1 = { video: { deviceId: { exact: id1 }, width: { ideal: 640 } } };
+      stream1 = await navigator.mediaDevices.getUserMedia(constraints1);
+      video1.srcObject = stream1; video1.style.display = 'inline';
+      if (id2 && id2 !== id1) {
+        const constraints2 = { video: { deviceId: { exact: id2 }, width: { ideal: 640 } } };
+        stream2 = await navigator.mediaDevices.getUserMedia(constraints2);
+        video2.srcObject = stream2; video2.style.display = 'inline';
+      } else {
+        stream2 = null; video2.srcObject = null; video2.style.display = 'none';
+      }
+    };
+
+    document.getElementById('run-realtime').onclick = () => {
+      realtime = !realtime;
+      document.getElementById('run-realtime').innerText = realtime ? "Stop" : "Run Realtime";
+      if (realtime) runRealtimeStereoOrMono();
+      else if (animFrame) cancelAnimationFrame(animFrame);
+    };
+
+    // ===== Kalman Tracker (minimal) =====
     function boxIoU(boxA, boxB) {
       const [xA1, yA1, xA2, yA2] = boxA, [xB1, yB1, xB2, yB2] = boxB;
       const xI1 = Math.max(xA1, xB1), yI1 = Math.max(yA1, yB1);
       const xI2 = Math.min(xA2, xB2), yI2 = Math.min(yA2, yB2);
       const iw = Math.max(0, xI2 - xI1), ih = Math.max(0, yI2 - yI1);
       const inter = iw * ih;
-      const areaA = (xA2 - xA1) * (yA2 - yA1);
-      const areaB = (xB2 - xB1) * (yB2 - yB1);
+      const areaA = (xA2 - xA1) * (yA2 - yA1), areaB = (xB2 - xB1) * (yB2 - yB1);
       const union = areaA + areaB - inter;
       return union === 0 ? 0 : inter / union;
     }
-
-    // Simple Hungarian for assignment (as above)
     function hungarianAlgorithm(costMatrix) {
       if (!costMatrix.length || !costMatrix[0].length) return [];
-      let n = costMatrix.length;
-      let m = costMatrix[0].length;
-      let size = Math.max(n, m);
+      let n = costMatrix.length, m = costMatrix[0].length, size = Math.max(n, m);
       let cost = Array.from({length: size}, (_, i) =>
         Array.from({length: size}, (_, j) => (i < n && j < m) ? costMatrix[i][j] : 10000)
       );
-      // Row reduction
       for (let i = 0; i < size; ++i) {
         let minVal = Math.min(...cost[i]);
         for (let j = 0; j < size; ++j) cost[i][j] -= minVal;
       }
-      // Column reduction
       for (let j = 0; j < size; ++j) {
         let minVal = Math.min(...cost.map(row => row[j]));
         for (let i = 0; i < size; ++i) cost[i][j] -= minVal;
       }
-      // Greedy assignment (good enough for <20 objects)
-      let result = [];
-      let usedRows = new Set(), usedCols = new Set();
+      let result = [], usedRows = new Set(), usedCols = new Set();
       while (result.length < Math.min(n, m)) {
         let best = null, bestVal = 10000;
         for (let i = 0; i < n; ++i) {
           if (usedRows.has(i)) continue;
           for (let j = 0; j < m; ++j) {
             if (usedCols.has(j)) continue;
-            if (cost[i][j] < bestVal) {
-              best = [i, j];
-              bestVal = cost[i][j];
-            }
+            if (cost[i][j] < bestVal) { best = [i, j]; bestVal = cost[i][j]; }
           }
         }
         if (!best) break;
         result.push(best);
-        usedRows.add(best[0]);
-        usedCols.add(best[1]);
+        usedRows.add(best[0]); usedCols.add(best[1]);
       }
-      return result; // array of [row, col] assignments
+      return result;
     }
-
     class KalmanFilter {
       constructor(x, y, w, h) {
         this.x = x; this.y = y; this.w = w; this.h = h;
-        this.vx = 0; this.vy = 0; this.vw = 0; this.vh = 0;
-        this.P = 1;
+        this.vx = 0; this.vy = 0; this.vw = 0; this.vh = 0; this.P = 1;
       }
       predict() {
-        this.x += this.vx;
-        this.y += this.vy;
-        this.w += this.vw;
-        this.h += this.vh;
-        this.P += 1;
+        this.x += this.vx; this.y += this.vy;
+        this.w += this.vw; this.h += this.vh; this.P += 1;
         return [this.x, this.y, this.w, this.h];
       }
       update(nx, ny, nw, nh) {
         const K = this.P / (this.P + 1);
-        this.x += K * (nx - this.x);
-        this.y += K * (ny - this.y);
-        this.w += K * (nw - this.w);
-        this.h += K * (nh - this.h);
-        this.vx = nx - this.x;
-        this.vy = ny - this.y;
-        this.vw = nw - this.w;
-        this.vh = nh - this.h;
-        this.P *= (1 - K);
+        this.x += K * (nx - this.x); this.y += K * (ny - this.y);
+        this.w += K * (nw - this.w); this.h += K * (nh - this.h);
+        this.vx = nx - this.x; this.vy = ny - this.y;
+        this.vw = nw - this.w; this.vh = nh - this.h; this.P *= (1 - K);
       }
     }
-
     class Track {
       constructor(id, detection) {
         const [x, y, w, h] = Track.toXYWH(detection.box);
         this.id = id;
         this.kf = new KalmanFilter(x, y, w, h);
-        this.age = 1;
-        this.missed = 0;
-        this.box = detection.box;
-        this.label = detection.label;
-        this.score = detection.score;
-        this.class = detection.class;
+        this.age = 1; this.missed = 0;
+        this.box = detection.box; this.label = detection.label;
+        this.score = detection.score; this.class = detection.class;
+        this.embedding = detection.embedding || null;
       }
-      static toXYWH([x1, y1, x2, y2]) {
-        return [
-          (x1 + x2) / 2,
-          (y1 + y2) / 2,
-          x2 - x1,
-          y2 - y1
-        ];
-      }
-      static toXYXY([x, y, w, h]) {
-        return [
-          x - w/2, y - h/2,
-          x + w/2, y + h/2
-        ];
-      }
-      predict() {
-        const [x, y, w, h] = this.kf.predict();
-        this.box = Track.toXYXY([x, y, w, h]);
-        return this.box;
-      }
+      static toXYWH([x1, y1, x2, y2]) { return [(x1 + x2) / 2, (y1 + y2) / 2, x2 - x1, y2 - y1]; }
+      static toXYXY([x, y, w, h]) { return [x - w/2, y - h/2, x + w/2, y + h/2]; }
+      predict() { const [x, y, w, h] = this.kf.predict(); this.box = Track.toXYXY([x, y, w, h]); return this.box; }
       update(detection) {
         const [x, y, w, h] = Track.toXYWH(detection.box);
-        this.kf.update(x, y, w, h);
-        this.box = detection.box;
-        this.label = detection.label;
-        this.score = detection.score;
-        this.class = detection.class;
-        this.missed = 0;
-        this.age += 1;
+        this.kf.update(x, y, w, h); this.box = detection.box;
+        this.label = detection.label; this.score = detection.score; this.class = detection.class;
+        this.embedding = detection.embedding || null; this.missed = 0; this.age += 1;
       }
-      markMissed() {
-        this.missed += 1;
-        this.age += 1;
-      }
+      markMissed() { this.missed += 1; this.age += 1; }
     }
-
     class SOTA_KalmanTracker {
-      constructor({iouThresh=0.3, maxMissed=5, minHits=2} = {}) {
-        this.tracks = [];
-        this.nextId = 1;
-        this.iouThresh = iouThresh;
-        this.maxMissed = maxMissed;
-        this.minHits = minHits;
+      constructor({iouThresh=0.3, maxMissed=6, minHits=1} = {}) {
+        this.tracks = []; this.nextId = 1;
+        this.iouThresh = iouThresh; this.maxMissed = maxMissed; this.minHits = minHits;
       }
-
       update(detections) {
-        // 1. Predict all tracks forward
         this.tracks.forEach(t => t.predict());
-        // 2. Build cost matrix (1 - IoU)
         let costMatrix = this.tracks.map(track =>
           detections.map(det => 1 - boxIoU(track.box, det.box))
         );
-        // 3. Hungarian assignment
         let assignments = hungarianAlgorithm(costMatrix);
-
-        // 4. Track/detection matching
         let assignedTracks = new Set(), assignedDets = new Set();
         assignments.forEach(([tIdx, dIdx]) => {
           if (this.tracks[tIdx] && detections[dIdx]) {
             let iou = 1 - costMatrix[tIdx][dIdx];
             if (iou >= this.iouThresh) {
               this.tracks[tIdx].update(detections[dIdx]);
-              assignedTracks.add(tIdx);
-              assignedDets.add(dIdx);
+              assignedTracks.add(tIdx); assignedDets.add(dIdx);
             }
           }
         });
-        // 5. Mark missed and age tracks
-        this.tracks.forEach((track, tIdx) => {
-          if (!assignedTracks.has(tIdx)) track.markMissed();
-        });
-        // 6. Remove dead tracks
+        this.tracks.forEach((track, tIdx) => { if (!assignedTracks.has(tIdx)) track.markMissed(); });
         this.tracks = this.tracks.filter(track => track.missed <= this.maxMissed);
-        // 7. Create new tracks for unmatched detections
-        detections.forEach((det, dIdx) => {
-          if (!assignedDets.has(dIdx)) {
-            this.tracks.push(new Track(this.nextId++, det));
-          }
-        });
-        // 8. Return active tracks (with sufficient age)
+        detections.forEach((det, dIdx) => { if (!assignedDets.has(dIdx)) this.tracks.push(new Track(this.nextId++, det)); });
         return this.tracks.filter(t => t.age >= this.minHits || t.missed < 1);
       }
     }
+    const tracker = new SOTA_KalmanTracker();
 
-    // ==== Drawing and helper functions ====
-    function drawBoxes(origImg, tracks, canvas) {
+    // ===== Helper functions =====
+    function scaleCoords(modelSize, imgSize, coords) {
+      const [iw, ih] = imgSize, [mw, mh] = [modelSize, modelSize];
+      const r = Math.min(mw / iw, mh / ih);
+      const newUnpad = [Math.round(iw * r), Math.round(ih * r)];
+      const dw = (mw - newUnpad[0]) / 2, dh = (mh - newUnpad[1]) / 2;
+      let [x1, y1, x2, y2] = coords;
+      x1 = Math.max(0, (x1 - dw) / r); y1 = Math.max(0, (y1 - dh) / r);
+      x2 = Math.min(iw, (x2 - dw) / r); y2 = Math.min(ih, (y2 - dh) / r);
+      return [x1, y1, x2, y2];
+    }
+    function cosineSimilarity(a, b) {
+      let dot=0, normA=0, normB=0;
+      for (let i=0; i<a.length; ++i) {
+        dot += a[i]*b[i]; normA += a[i]*a[i]; normB += b[i]*b[i];
+      }
+      return dot / (Math.sqrt(normA)*Math.sqrt(normB)+1e-8);
+    }
+
+    // ===== Detection, Embedding, Drawing, Stereo =====
+    async function runRealtimeStereoOrMono() {
+      if (!realtime) return;
+      if (!video1.srcObject) { outputDiv.innerText = "Start the camera(s) first!"; return; }
+      if (!session) { outputDiv.innerText = "Model not loaded!"; return; }
+      const useStereo = video2.srcObject && document.getElementById('camera-select-2').value && video2.readyState === 4;
+      if ((++frameId % FRAME_SKIP) !== 0) return animFrame = requestAnimationFrame(runRealtimeStereoOrMono);
+
+      async function getTensorFromVideo(video, inputSize) {
+        const tmp = document.createElement('canvas');
+        tmp.width = video.videoWidth; tmp.height = video.videoHeight;
+        tmp.getContext('2d').drawImage(video, 0, 0, tmp.width, tmp.height);
+        const img = new Image(); img.src = tmp.toDataURL();
+        await new Promise(res => img.onload = res);
+        const canvas2 = document.createElement('canvas');
+        canvas2.width = inputSize; canvas2.height = inputSize;
+        const ctx = canvas2.getContext('2d');
+        ctx.fillStyle = "#808080"; ctx.fillRect(0,0,inputSize,inputSize);
+        const [iw, ih] = [img.naturalWidth || img.width, img.naturalHeight || img.height];
+        const r = Math.min(inputSize/iw, inputSize/ih);
+        const newW = Math.round(iw*r), newH = Math.round(ih*r);
+        const dx = Math.floor((inputSize - newW)/2), dy = Math.floor((inputSize - newH)/2);
+        ctx.drawImage(img, dx, dy, newW, newH);
+        const imageData = ctx.getImageData(0, 0, inputSize, inputSize).data;
+        const floatArray = new Float32Array(inputSize*inputSize*3);
+        for (let i=0; i<inputSize*inputSize; ++i) {
+          floatArray[i] = imageData[i*4]/255.0;
+          floatArray[inputSize*inputSize+i] = imageData[i*4+1]/255.0;
+          floatArray[2*inputSize*inputSize+i] = imageData[i*4+2]/255.0;
+        }
+        return { floatArray, imgForDraw: img };
+      }
+
+      async function getMobileNetEmbedding(video, box, mobilenetSession) {
+        const [x1, y1, x2, y2] = box.map(Math.round);
+        const cropW = Math.max(1, x2 - x1), cropH = Math.max(1, y2 - y1);
+        const cropCanvas = document.createElement('canvas');
+        cropCanvas.width = MOBILENET_SIZE; cropCanvas.height = MOBILENET_SIZE;
+        const ctx = cropCanvas.getContext('2d');
+        ctx.drawImage(video, x1, y1, cropW, cropH, 0, 0, MOBILENET_SIZE, MOBILENET_SIZE);
+        const imgData = ctx.getImageData(0, 0, MOBILENET_SIZE, MOBILENET_SIZE).data;
+        const floatArray = new Float32Array(MOBILENET_SIZE*MOBILENET_SIZE*3);
+        for (let i = 0; i < MOBILENET_SIZE*MOBILENET_SIZE; ++i) {
+          floatArray[i] = imgData[i*4] / 255.0;
+          floatArray[MOBILENET_SIZE*MOBILENET_SIZE + i] = imgData[i*4 + 1] / 255.0;
+          floatArray[2*MOBILENET_SIZE*MOBILENET_SIZE + i] = imgData[i*4 + 2] / 255.0;
+        }
+        const tensor = new ort.Tensor('float32', floatArray, [1,3,MOBILENET_SIZE,MOBILENET_SIZE]);
+        const feeds = {}; feeds[mobilenetSession.inputNames[0]] = tensor;
+        const results = await mobilenetSession.run(feeds);
+        const output = results[Object.keys(results)[0]].data;
+        // Use as feature vector
+        const norm = Math.sqrt(output.reduce((s,v)=>s+v*v,0));
+        return output.map(v => v/norm);
+      }
+
+      async function detectAndEmbed(video, session, mobilenetSession, inputSize) {
+        const { floatArray, imgForDraw } = await getTensorFromVideo(video, inputSize);
+        const feeds = {}; feeds[session.inputNames[0]] = new ort.Tensor('float32', floatArray, [1,3,inputSize,inputSize]);
+        const results = await session.run(feeds);
+        const output = results[session.outputNames[0]];
+        let dets = output.data, detections = [];
+        for (let i=0; i<dets.length; i+=6) {
+          const x1 = dets[i], y1 = dets[i+1], x2 = dets[i+2], y2 = dets[i+3], score = dets[i+4], class_id = dets[i+5];
+          if (score < parseFloat(document.getElementById('conf-thresh').value)) continue;
+          detections.push({
+            box: scaleCoords(INPUT_SIZE, [video.videoWidth, video.videoHeight], [x1, y1, x2, y2]),
+            score, class: class_id,
+            label: coco_labels[class_id] || `class${class_id}`
+          });
+        }
+        detections.sort((a,b) => b.score - a.score);
+        detections = detections.slice(0, MAX_DETECTIONS);
+        if (mobilenetSession) {
+          for (let det of detections) det.embedding = await getMobileNetEmbedding(video, det.box, mobilenetSession);
+        }
+        return { detections, imgForDraw };
+      }
+
+      const { detections: detections1, imgForDraw } = await detectAndEmbed(video1, session, mobilenetSession, INPUT_SIZE);
+      const tracks = tracker.update(detections1);
+
+      let depthMap = {};
+      if (useStereo) {
+        const { detections: detections2 } = await detectAndEmbed(video2, session, mobilenetSession, INPUT_SIZE);
+        for (let t of tracks) {
+          if (!t.embedding) continue;
+          let bestDet2=null, bestSim=-1;
+          for (let d2 of detections2) {
+            if (!d2.embedding) continue;
+            let sim = cosineSimilarity(t.embedding, d2.embedding);
+            if (sim > bestSim) { bestSim=sim; bestDet2=d2; }
+          }
+          if (bestDet2 && bestSim>0.7) {
+            const [x1, , x2, ] = t.box;
+            const [xr1, , xr2, ] = bestDet2.box;
+            const xc1 = (x1 + x2)/2, xc2 = (xr1 + xr2)/2;
+            let disparity = Math.abs(xc1 - xc2);
+            let depth = (F * B) / (disparity + 1e-6);
+            depthMap[t.id] = depth;
+          }
+        }
+      }
+
+      canvas.width = INPUT_SIZE; canvas.height = INPUT_SIZE;
+      drawBoxesWithDepth(imgForDraw, tracks, canvas, depthMap);
+
+      let detectionText = tracks.length
+        ? tracks.map(t => `ID:${t.id} ${t.label}: ${(t.score*100).toFixed(1)}%` + (depthMap[t.id] ? ` Depth: ${depthMap[t.id].toFixed(2)}m` : "")).join(', ')
+        : 'No objects detected.';
+      if (detectionText !== lastOutputText) {
+        outputDiv.innerText = detectionText; lastOutputText = detectionText;
+      }
+      animFrame = requestAnimationFrame(runRealtimeStereoOrMono);
+    }
+    function drawBoxesWithDepth(origImg, tracks, canvas, depthMap={}) {
       const ctx = canvas.getContext('2d');
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.clearRect(0,0,canvas.width,canvas.height);
       const [iw, ih] = [origImg.naturalWidth || origImg.width, origImg.naturalHeight || origImg.height];
       const [mw, mh] = [canvas.width, canvas.height];
       const r = Math.min(mw / iw, mh / ih);
       const newW = Math.round(iw * r), newH = Math.round(ih * r);
-      const dx = (mw - newW) / 2, dy = (mh - newH) / 2;
+      const dx = (mw - newW)/2, dy = (mh - newH)/2;
       ctx.fillStyle = "#eee";
-      ctx.fillRect(0, 0, mw, mh);
+      ctx.fillRect(0,0,mw,mh);
       ctx.drawImage(origImg, dx, dy, newW, newH);
-
-      ctx.font = "bold 16px Arial";
-      ctx.lineWidth = 3;
+      ctx.font = "bold 16px Arial"; ctx.lineWidth = 3;
       tracks.forEach(track => {
         const [x1, y1, x2, y2] = track.box;
         const xx1 = x1 * r + dx, yy1 = y1 * r + dy;
         const xx2 = x2 * r + dx, yy2 = y2 * r + dy;
-        // Draw box with color for track.id
-        const color = track.missed > 0 ? "#ffaa00" : "#00ff00";
-        ctx.strokeStyle = color;
-        ctx.fillStyle = color;
-        ctx.globalAlpha = track.missed > 0 ? 0.10 : 0.18;
-        ctx.fillRect(xx1, yy1, xx2 - xx1, yy2 - yy1);
-        ctx.globalAlpha = 1;
-        ctx.strokeRect(xx1, yy1, xx2 - xx1, yy2 - yy1);
+        const color = track.missed>0 ? "#ffaa00" : "#00ff00";
+        ctx.strokeStyle = color; ctx.fillStyle = color;
+        ctx.globalAlpha = track.missed>0 ? 0.10 : 0.18;
+        ctx.fillRect(xx1, yy1, xx2-xx1, yy2-yy1);
+        ctx.globalAlpha = 1; ctx.strokeRect(xx1, yy1, xx2-xx1, yy2-yy1);
         ctx.fillStyle = "#222";
-        const labelText = `ID:${track.id} ${track.label} ${(track.score * 100).toFixed(1)}%`;
-        ctx.fillRect(xx1, yy1 - 24, ctx.measureText(labelText).width + 20, 22);
+        let labelText = `ID:${track.id} ${track.label} ${(track.score*100).toFixed(1)}%`;
+        if (depthMap[track.id]) labelText += ` Depth: ${depthMap[track.id].toFixed(2)}m`;
+        ctx.fillRect(xx1, yy1-24, ctx.measureText(labelText).width+20, 22);
         ctx.fillStyle = "#fff";
-        ctx.fillText(labelText, xx1 + 5, yy1 - 7);
+        ctx.fillText(labelText, xx1+5, yy1 - 7);
       });
     }
 
-    // Scale coordinates from model size to original image size
-    function scaleCoords(modelSize, imgSize, coords) {
-      const [iw, ih] = imgSize;
-      const [mw, mh] = [modelSize, modelSize];
-      const r = Math.min(mw / iw, mh / ih);
-      const newUnpad = [Math.round(iw * r), Math.round(ih * r)];
-      const dw = (mw - newUnpad[0]) / 2;
-      const dh = (mh - newUnpad[1]) / 2;
-      let [x1, y1, x2, y2] = coords;
-      x1 = Math.max(0, (x1 - dw) / r);
-      y1 = Math.max(0, (y1 - dh) / r);
-      x2 = Math.min(iw, (x2 - dw) / r);
-      y2 = Math.min(ih, (y2 - dh) / r);
-      return [x1, y1, x2, y2];
-    }
-
-
-    // ==== Camera handling ====
-    async function populateWebcams() {
-      if (!navigator.mediaDevices?.enumerateDevices) return;
-      const devices = await navigator.mediaDevices.enumerateDevices();
-      webcamSelect.innerHTML = '';
-      devices.filter(d => d.kind === 'videoinput').forEach((d, idx) => {
-        const opt = document.createElement('option');
-        opt.value = d.deviceId;
-        opt.text = d.label || `Camera ${idx+1}`;
-        webcamSelect.appendChild(opt);
-      });
-    }
-    document.getElementById('webcam-start').onclick = async () => {
-      if (webcamStream) webcamStream.getTracks().forEach(t => t.stop());
-      let constraints = { video: { width: { ideal: 640 } } };
-      const deviceId = webcamSelect.value;
-      if (deviceId) constraints.video.deviceId = { ideal: deviceId };
-      try {
-        webcamStream = await navigator.mediaDevices.getUserMedia(constraints);
-        webcamVideo.srcObject = webcamStream;
-        webcamVideo.style.display = 'inline';
-      } catch (e) {
-        alert("Could not start webcam: " + e.name + "\nTry a different camera or refresh.");
-      }
-    };
-    document.getElementById('webcam-realtime').onclick = () => {
-      realtime = !realtime;
-      document.getElementById('webcam-realtime').innerText = realtime ? "Stop" : "Run Realtime";
-      if (realtime) runWebcamRealtime();
-      else if (animFrame) cancelAnimationFrame(animFrame);
-    };
-
-    // ==== Tracker instance ====
-    const tracker = new SOTA_KalmanTracker({iouThresh:0.3, maxMissed:6, minHits:1});
-
-    // ==== Main detection loop with tracking ====
-    async function runWebcamRealtime() {
-      if (!realtime) return;
-      frameId++;
-      if (frameId % FRAME_SKIP !== 0) {
-        animFrame = requestAnimationFrame(runWebcamRealtime);
-        return;
-      }
-      if (!session) {
-        document.getElementById('webcam-realtime').innerText = "Run Realtime";
-        return alert("Model not loaded!");
-      }
-      if (!webcamVideo.srcObject) {
-        document.getElementById('webcam-realtime').innerText = "Run Realtime";
-        return alert("Start the webcam first!");
-      }
-      if (webcamVideo.readyState === 4) {
-        const tmp = document.createElement('canvas');
-        tmp.width = webcamVideo.videoWidth;
-        tmp.height = webcamVideo.videoHeight;
-        tmp.getContext('2d').drawImage(webcamVideo, 0, 0, tmp.width, tmp.height);
-
-        let floatArray, imgForDraw;
-        if (canUseWorker && preprocessWorker) {
-          const imageBitmapForWorker = await createImageBitmap(tmp);
-          const imageBitmapForDraw = await createImageBitmap(tmp);
-          floatArray = await preprocessInWorker(imageBitmapForWorker, INPUT_SIZE);
-          imgForDraw = imageBitmapForDraw;
-        } else {
-          const img = new Image();
-          img.src = tmp.toDataURL();
-          await new Promise(res => img.onload = res);
-          floatArray = preprocessFallback(img, INPUT_SIZE);
-          imgForDraw = img;
-        }
-        const tensor = new ort.Tensor('float32', floatArray, [1, 3, INPUT_SIZE, INPUT_SIZE]);
-        const feeds = {}; feeds[session.inputNames[0]] = tensor;
-        const results = await session.run(feeds);
-        let output = results[session.outputNames[0]];
-        let dets;
-        if (output.dims.length === 2 || output.dims.length === 3) dets = output.data;
-        else return alert("Unexpected output shape: " + output.dims);
-
-        let detections = [];
-        for (let i = 0; i < dets.length; i += 6) {
-          const x1 = dets[i], y1 = dets[i+1], x2 = dets[i+2], y2 = dets[i+3], score = dets[i+4], class_id = dets[i+5];
-          if (score < parseFloat(confThreshInput.value)) continue;
-          detections.push({
-            box: scaleCoords(INPUT_SIZE, [webcamVideo.videoWidth, webcamVideo.videoHeight], [x1, y1, x2, y2]),
-            score: score,
-            class: class_id,
-            label: coco_labels[class_id] || `class${class_id}`
-          });
-        }
-        detections.sort((a, b) => b.score - a.score);
-        detections = detections.slice(0, MAX_DETECTIONS || 10);
-
-        // ---- TRACKING ----
-        const tracks = tracker.update(detections);
-
-        canvas.width = INPUT_SIZE; canvas.height = INPUT_SIZE;
-        drawBoxes(imgForDraw, tracks, canvas);
-        let detectionText = tracks.length ?
-          tracks.map(t => `ID:${t.id} ${t.label}: ${(t.score*100).toFixed(1)}%`).join(', ')
-          : 'No objects detected.';
-        if (detectionText !== lastOutputText) {
-          outputDiv.innerText = detectionText;
-          lastOutputText = detectionText;
-        }
-      }
-      animFrame = requestAnimationFrame(runWebcamRealtime);
-    }
-
-    // Populate cameras on load and when changed
-    populateWebcams();
-    navigator.mediaDevices?.addEventListener?.('devicechange', populateWebcams);
-
-    // === AUTO-LOAD ONNX MODEL FROM RELATIVE PATH WITH WEBGPU SUPPORT ===
+    // ===== Load YOLOv12 and MobileNetV3-Large-Quantized =====
     (async () => {
-      outputDiv.innerText = "Loading model yolo12nms.onnx...";
+      outputDiv.innerText = "Loading YOLOv12 ONNX...";
       ort.env.wasm.numThreads = 1;
-      ort.env.webgpu = ort.env.webgpu || {};
-      ort.env.webgpu.enabled = true;
-      let ep = 'wasm';
-      if ('gpu' in navigator) ep = 'webgpu';
+      ort.env.webgpu = ort.env.webgpu || {}; ort.env.webgpu.enabled = true;
+      let ep = 'wasm'; if ('gpu' in navigator) ep = 'webgpu';
       try {
         const resp = await fetch('yolo12nms.onnx');
-        if (!resp.ok) {
-          outputDiv.innerText = "Failed to fetch yolo12nms.onnx!";
-          return;
-        }
+        if (!resp.ok) { outputDiv.innerText = "Failed to fetch yolo12nms.onnx!"; return; }
         const buffer = await resp.arrayBuffer();
         session = await ort.InferenceSession.create(buffer, { executionProviders: [ep] });
-        outputDiv.innerText = "ONNX model loaded! Provider: " + ep.toUpperCase();
-      } catch (err) {
-        outputDiv.innerText = "Model load error: " + err;
-      }
+        outputDiv.innerText = "YOLOv12 loaded!";
+      } catch (err) { outputDiv.innerText = "YOLO model load error: "+err; }
+      outputDiv.innerText += "\nLoading MobileNetV3-Large-Q...";
+      try {
+        const resp = await fetch('mobilenetv3-large-q.onnx');
+        if (!resp.ok) { outputDiv.innerText += "\nFailed to fetch MobileNetV3!"; return; }
+        const buffer = await resp.arrayBuffer();
+        mobilenetSession = await ort.InferenceSession.create(buffer, { executionProviders: [ep] });
+        outputDiv.innerText += "\nMobileNetV3-Large-Q loaded!";
+      } catch (err) { outputDiv.innerText += "\nMobileNetV3 load error: "+err; }
     })();
   </script>
 </body>
