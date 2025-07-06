@@ -394,11 +394,11 @@
       } catch (err) { outputDiv.innerText = "YOLO model load error: "+err; }
       outputDiv.innerText += "\nLoading MobileNetV3-Large-Q...";
       try {
-        const resp = await fetch('mobilenetv3-large-q.onnx');
+        const resp = await fetch('MobileNet-v3-Large.onnx');
         if (!resp.ok) { outputDiv.innerText += "\nFailed to fetch MobileNetV3!"; return; }
         const buffer = await resp.arrayBuffer();
         mobilenetSession = await ort.InferenceSession.create(buffer, { executionProviders: [ep] });
-        outputDiv.innerText += "\nMobileNetV3-Large-Q loaded!";
+        outputDiv.innerText += "\nMobileNetV3-Large loaded!";
       } catch (err) { outputDiv.innerText += "\nMobileNetV3 load error: "+err; }
     })();
   </script>
