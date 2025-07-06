@@ -307,6 +307,16 @@
         }
         detections.sort((a,b) => b.score - a.score);
         detections = detections.slice(0, MAX_DETECTIONS);
+        if (!detections || detections.length === 0) {
+          // No detections: skip embedding and tracking!
+          outputDiv.innerText = "No objects detected.";
+          // Optionally clear the canvas (so the boxes disappear)
+          const ctx = canvas.getContext('2d');
+          ctx.clearRect(0, 0, canvas.width, canvas.height);
+          animFrame = requestAnimationFrame(runRealtimeStereoOrMono);
+          return { detections: [], imgForDraw };
+        }
+
         if (mobilenetSession) {
           for (let det of detections) det.embedding = await getMobileNetEmbedding(video, det.box, mobilenetSession);
         }
