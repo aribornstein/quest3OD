@@ -197,9 +197,11 @@
 
         let floatArray, imgForDraw;
         if (canUseWorker && preprocessWorker) {
-          const imageBitmap = await createImageBitmap(tmp);
-          floatArray = await preprocessInWorker(imageBitmap, INPUT_SIZE);
-          imgForDraw = imageBitmap;
+          // FIX: Use TWO ImageBitmaps so one isn't detached by the worker!
+          const imageBitmapForWorker = await createImageBitmap(tmp);
+          const imageBitmapForDraw = await createImageBitmap(tmp);
+          floatArray = await preprocessInWorker(imageBitmapForWorker, INPUT_SIZE);
+          imgForDraw = imageBitmapForDraw;
         } else {
           // Fallback for browsers without OffscreenCanvas or Worker
           const img = new Image();
