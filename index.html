@@ -12,7 +12,7 @@
   </style>
 </head>
 <body>
-  <h2>YOLOv12 ONNX Browser Webcam Demo (WebGPU, OffscreenCanvas worker, memory tracking, anti-flicker, frame skipping)</h2>
+  <h2>YOLOv12 ONNX Browser Webcam Demo (WebGPU, OffscreenCanvas worker, SOTA Kalman tracker, anti-flicker, frame skipping)</h2>
   <div class="controls">
     <label>Webcam:
       <select id="webcam-select"></select>
@@ -27,11 +27,9 @@
   <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/ort.min.js"></script>
   <script>
     // ======= SETTINGS =======
-    const INPUT_SIZE = 320; // set to 320 for extra speed
-    const FRAME_SKIP = 2;   // inference every Nth frame
-    const MEMORY_FRAMES = 5;    // stickiness of memory
-    const FAST_MOVE_DIST = INPUT_SIZE / 16; // ~40px for 640, ~20px for 320
-    const MAX_DETECTIONS = 10; // max detections to show at once, tune as needed
+    const INPUT_SIZE = 320;
+    const FRAME_SKIP = 2;
+    const MAX_DETECTIONS = 10;
     // =======================
     const coco_labels = [
       'person','bicycle','car','motorcycle','airplane','bus','train','truck','boat','traffic light',
@@ -50,9 +48,6 @@
     let animFrame = null;
     let frameId = 0;
     let lastOutputText = "";
-
-    // Detection memory tracking
-    let detectionMemory = [];
 
     // ==== DOM refs ====
     const webcamVideo = document.getElementById('webcam-video');
@@ -75,7 +70,6 @@
         preprocessWorker.postMessage({ imageBitmap, size }, [imageBitmap]);
       });
     }
-    // Fallback sync preprocess
     function preprocessFallback(img, size=INPUT_SIZE) {
       const canvas = document.createElement('canvas');
       canvas.width = size; canvas.height = size;
@@ -97,39 +91,185 @@
       return floatArray;
     }
 
-    // ==== Drawing and helper functions ====
-    function scaleCoords(modelSize, imgSize, coords) {
-      const [iw, ih] = imgSize;
-      const [mw, mh] = [modelSize, modelSize];
-      const r = Math.min(mw / iw, mh / ih);
-      const newUnpad = [Math.round(iw * r), Math.round(ih * r)];
-      const dw = (mw - newUnpad[0]) / 2;
-      const dh = (mh - newUnpad[1]) / 2;
-      let [x1, y1, x2, y2] = coords;
-      x1 = Math.max(0, (x1 - dw) / r);
-      y1 = Math.max(0, (y1 - dh) / r);
-      x2 = Math.min(iw, (x2 - dw) / r);
-      y2 = Math.min(ih, (y2 - dh) / r);
-      return [x1, y1, x2, y2];
-    }
-    function boxCenter(box) {
-      return [(box[0] + box[2]) / 2, (box[1] + box[3]) / 2];
-    }
-    function boxSpeed(boxA, boxB) {
-      const [xA, yA] = boxCenter(boxA);
-      const [xB, yB] = boxCenter(boxB);
-      return Math.sqrt((xA - xB) ** 2 + (yA - yB) ** 2);
-    }
-    function iou(boxA, boxB) {
-      const xA = Math.max(boxA[0], boxB[0]), yA = Math.max(boxA[1], boxB[1]);
-      const xB = Math.min(boxA[2], boxB[2]), yB = Math.min(boxA[3], boxB[3]);
-      const interArea = Math.max(0, xB - xA) * Math.max(0, yB - yA);
-      const boxAArea = (boxA[2] - boxA[0]) * (boxA[3] - boxA[1]);
-      const boxBArea = (boxB[2] - boxB[0]) * (boxB[3] - boxB[1]);
-      return interArea / (boxAArea + boxBArea - interArea + 1e-6);
+    // ==== Tracker logic ====
+    function boxIoU(boxA, boxB) {
+      const [xA1, yA1, xA2, yA2] = boxA, [xB1, yB1, xB2, yB2] = boxB;
+      const xI1 = Math.max(xA1, xB1), yI1 = Math.max(yA1, yB1);
+      const xI2 = Math.min(xA2, xB2), yI2 = Math.min(yA2, yB2);
+      const iw = Math.max(0, xI2 - xI1), ih = Math.max(0, yI2 - yI1);
+      const inter = iw * ih;
+      const areaA = (xA2 - xA1) * (yA2 - yA1);
+      const areaB = (xB2 - xB1) * (yB2 - yB1);
+      const union = areaA + areaB - inter;
+      return union === 0 ? 0 : inter / union;
     }
 
-    function drawBoxes(origImg, detections, canvas) {
+    // Simple Hungarian for assignment (as above)
+    function hungarianAlgorithm(costMatrix) {
+      let n = costMatrix.length;
+      let m = costMatrix[0].length;
+      let size = Math.max(n, m);
+      let cost = Array.from({length: size}, (_, i) =>
+        Array.from({length: size}, (_, j) => (i < n && j < m) ? costMatrix[i][j] : 10000)
+      );
+      // Row reduction
+      for (let i = 0; i < size; ++i) {
+        let minVal = Math.min(...cost[i]);
+        for (let j = 0; j < size; ++j) cost[i][j] -= minVal;
+      }
+      // Column reduction
+      for (let j = 0; j < size; ++j) {
+        let minVal = Math.min(...cost.map(row => row[j]));
+        for (let i = 0; i < size; ++i) cost[i][j] -= minVal;
+      }
+      // Greedy assignment (good enough for <20 objects)
+      let result = [];
+      let usedRows = new Set(), usedCols = new Set();
+      while (result.length < Math.min(n, m)) {
+        let best = null, bestVal = 10000;
+        for (let i = 0; i < n; ++i) {
+          if (usedRows.has(i)) continue;
+          for (let j = 0; j < m; ++j) {
+            if (usedCols.has(j)) continue;
+            if (cost[i][j] < bestVal) {
+              best = [i, j];
+              bestVal = cost[i][j];
+            }
+          }
+        }
+        if (!best) break;
+        result.push(best);
+        usedRows.add(best[0]);
+        usedCols.add(best[1]);
+      }
+      return result; // array of [row, col] assignments
+    }
+
+    class KalmanFilter {
+      constructor(x, y, w, h) {
+        this.x = x; this.y = y; this.w = w; this.h = h;
+        this.vx = 0; this.vy = 0; this.vw = 0; this.vh = 0;
+        this.P = 1;
+      }
+      predict() {
+        this.x += this.vx;
+        this.y += this.vy;
+        this.w += this.vw;
+        this.h += this.vh;
+        this.P += 1;
+        return [this.x, this.y, this.w, this.h];
+      }
+      update(nx, ny, nw, nh) {
+        const K = this.P / (this.P + 1);
+        this.x += K * (nx - this.x);
+        this.y += K * (ny - this.y);
+        this.w += K * (nw - this.w);
+        this.h += K * (nh - this.h);
+        this.vx = nx - this.x;
+        this.vy = ny - this.y;
+        this.vw = nw - this.w;
+        this.vh = nh - this.h;
+        this.P *= (1 - K);
+      }
+    }
+
+    class Track {
+      constructor(id, detection) {
+        const [x, y, w, h] = Track.toXYWH(detection.box);
+        this.id = id;
+        this.kf = new KalmanFilter(x, y, w, h);
+        this.age = 1;
+        this.missed = 0;
+        this.box = detection.box;
+        this.label = detection.label;
+        this.score = detection.score;
+        this.class = detection.class;
+      }
+      static toXYWH([x1, y1, x2, y2]) {
+        return [
+          (x1 + x2) / 2,
+          (y1 + y2) / 2,
+          x2 - x1,
+          y2 - y1
+        ];
+      }
+      static toXYXY([x, y, w, h]) {
+        return [
+          x - w/2, y - h/2,
+          x + w/2, y + h/2
+        ];
+      }
+      predict() {
+        const [x, y, w, h] = this.kf.predict();
+        this.box = Track.toXYXY([x, y, w, h]);
+        return this.box;
+      }
+      update(detection) {
+        const [x, y, w, h] = Track.toXYWH(detection.box);
+        this.kf.update(x, y, w, h);
+        this.box = detection.box;
+        this.label = detection.label;
+        this.score = detection.score;
+        this.class = detection.class;
+        this.missed = 0;
+        this.age += 1;
+      }
+      markMissed() {
+        this.missed += 1;
+        this.age += 1;
+      }
+    }
+
+    class SOTA_KalmanTracker {
+      constructor({iouThresh=0.3, maxMissed=5, minHits=2} = {}) {
+        this.tracks = [];
+        this.nextId = 1;
+        this.iouThresh = iouThresh;
+        this.maxMissed = maxMissed;
+        this.minHits = minHits;
+      }
+
+      update(detections) {
+        // 1. Predict all tracks forward
+        this.tracks.forEach(t => t.predict());
+        // 2. Build cost matrix (1 - IoU)
+        let costMatrix = this.tracks.map(track =>
+          detections.map(det => 1 - boxIoU(track.box, det.box))
+        );
+        // 3. Hungarian assignment
+        let assignments = hungarianAlgorithm(costMatrix);
+
+        // 4. Track/detection matching
+        let assignedTracks = new Set(), assignedDets = new Set();
+        assignments.forEach(([tIdx, dIdx]) => {
+          if (this.tracks[tIdx] && detections[dIdx]) {
+            let iou = 1 - costMatrix[tIdx][dIdx];
+            if (iou >= this.iouThresh) {
+              this.tracks[tIdx].update(detections[dIdx]);
+              assignedTracks.add(tIdx);
+              assignedDets.add(dIdx);
+            }
+          }
+        });
+        // 5. Mark missed and age tracks
+        this.tracks.forEach((track, tIdx) => {
+          if (!assignedTracks.has(tIdx)) track.markMissed();
+        });
+        // 6. Remove dead tracks
+        this.tracks = this.tracks.filter(track => track.missed <= this.maxMissed);
+        // 7. Create new tracks for unmatched detections
+        detections.forEach((det, dIdx) => {
+          if (!assignedDets.has(dIdx)) {
+            this.tracks.push(new Track(this.nextId++, det));
+          }
+        });
+        // 8. Return active tracks (with sufficient age)
+        return this.tracks.filter(t => t.age >= this.minHits || t.missed < 1);
+      }
+    }
+
+    // ==== Drawing and helper functions ====
+    function drawBoxes(origImg, tracks, canvas) {
       const ctx = canvas.getContext('2d');
       ctx.clearRect(0, 0, canvas.width, canvas.height);
       const [iw, ih] = [origImg.naturalWidth || origImg.width, origImg.naturalHeight || origImg.height];
@@ -143,21 +283,23 @@
 
       ctx.font = "bold 16px Arial";
       ctx.lineWidth = 3;
-      detections.forEach(det => {
-        const [x1, y1, x2, y2] = det.box;
+      tracks.forEach(track => {
+        const [x1, y1, x2, y2] = track.box;
         const xx1 = x1 * r + dx, yy1 = y1 * r + dy;
         const xx2 = x2 * r + dx, yy2 = y2 * r + dy;
-        // Fade if memory-only
-        ctx.strokeStyle = det.faded ? "#ffaa00" : "#00ff00";
-        ctx.fillStyle = det.faded ? "#ffaa00" : "#00ff00";
-        ctx.globalAlpha = det.faded ? 0.10 : 0.18;
+        // Draw box with color for track.id
+        const color = track.missed > 0 ? "#ffaa00" : "#00ff00";
+        ctx.strokeStyle = color;
+        ctx.fillStyle = color;
+        ctx.globalAlpha = track.missed > 0 ? 0.10 : 0.18;
         ctx.fillRect(xx1, yy1, xx2 - xx1, yy2 - yy1);
         ctx.globalAlpha = 1;
         ctx.strokeRect(xx1, yy1, xx2 - xx1, yy2 - yy1);
-        ctx.fillStyle = det.faded ? "#888" : "#222";
-        ctx.fillRect(xx1, yy1 - 24, ctx.measureText(det.label).width + 70, 22);
+        ctx.fillStyle = "#222";
+        const labelText = `ID:${track.id} ${track.label} ${(track.score * 100).toFixed(1)}%`;
+        ctx.fillRect(xx1, yy1 - 24, ctx.measureText(labelText).width + 20, 22);
         ctx.fillStyle = "#fff";
-        ctx.fillText(`${det.label} ${(det.score * 100).toFixed(1)}%`, xx1 + 5, yy1 - 7);
+        ctx.fillText(labelText, xx1 + 5, yy1 - 7);
       });
     }
 
@@ -193,7 +335,10 @@
       else if (animFrame) cancelAnimationFrame(animFrame);
     };
 
-    // ==== Main detection loop with memory ====
+    // ==== Tracker instance ====
+    const tracker = new SOTA_KalmanTracker({iouThresh:0.3, maxMissed:6, minHits:1});
+
+    // ==== Main detection loop with tracking ====
     async function runWebcamRealtime() {
       if (!realtime) return;
       frameId++;
@@ -247,55 +392,16 @@
             label: coco_labels[class_id] || `class${class_id}`
           });
         }
-        // Only keep the top-N highest confidence boxes (N=10 here, tune as needed)
         detections.sort((a, b) => b.score - a.score);
         detections = detections.slice(0, MAX_DETECTIONS || 10);
 
+        // ---- TRACKING ----
+        const tracks = tracker.update(detections);
 
-        // === Detection Memory logic ===
-        detectionMemory.forEach(mem => mem.seen = false);
-        detections.forEach(det => {
-          let bestIou = 0, bestIdx = -1, matchThreshold = 0.5;
-          detectionMemory.forEach((mem, mi) => {
-            if (mem.label === det.label) {
-              let currSpeed = mem.lastBox ? boxSpeed(det.box, mem.lastBox) : 0;
-              let threshold = currSpeed > FAST_MOVE_DIST ? 0.3 : 0.5;
-              let currIou = iou(det.box, mem.box);
-              if (currIou > threshold && currIou > bestIou) {
-                bestIou = currIou; bestIdx = mi; matchThreshold = threshold;
-              }
-            }
-          });
-          if (bestIdx >= 0) {
-            detectionMemory[bestIdx] = {
-              ...det,
-              framesLeft: MEMORY_FRAMES,
-              seen: true,
-              lastBox: detectionMemory[bestIdx].box
-            };
-          } else {
-            detectionMemory.push({
-              ...det,
-              framesLeft: MEMORY_FRAMES,
-              seen: true,
-              lastBox: det.box
-            });
-          }
-        });
-        detectionMemory = detectionMemory.filter(mem => {
-          if (!mem.seen) mem.framesLeft--;
-          return mem.framesLeft > 0;
-        });
-        const allDetections = [
-          ...detectionMemory.map(mem => ({
-            ...mem,
-            faded: !mem.seen
-          }))
-        ];
         canvas.width = INPUT_SIZE; canvas.height = INPUT_SIZE;
-        drawBoxes(imgForDraw, allDetections, canvas);
-        let detectionText = allDetections.length ?
-          allDetections.map(d => `${d.label}: ${(d.score*100).toFixed(1)}%`).join(', ')
+        drawBoxes(imgForDraw, tracks, canvas);
+        let detectionText = tracks.length ?
+          tracks.map(t => `ID:${t.id} ${t.label}: ${(t.score*100).toFixed(1)}%`).join(', ')
           : 'No objects detected.';
         if (detectionText !== lastOutputText) {
           outputDiv.innerText = detectionText;
