@@ -22,15 +22,16 @@
     <label>Conf Threshold: <input id="conf-thresh" type="number" value="0.7" step="0.01" min="0" max="1" style="width:3em"></label>
   </div>
   <video id="webcam-video" width="640" height="480" autoplay playsinline style="display:none"></video>
-  <canvas id="canvas" width="640" height="640"></canvas>
+  <canvas id="canvas" width="320" height="320"></canvas>
   <div id="output"></div>
   <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/ort.min.js"></script>
   <script>
     // ======= SETTINGS =======
-    const INPUT_SIZE = 640; // set to 320 for extra speed
+    const INPUT_SIZE = 320; // set to 320 for extra speed
     const FRAME_SKIP = 2;   // inference every Nth frame
     const MEMORY_FRAMES = 5;    // stickiness of memory
     const FAST_MOVE_DIST = INPUT_SIZE / 16; // ~40px for 640, ~20px for 320
+    const MAX_DETECTIONS = 10; // max detections to show at once, tune as needed
     // =======================
     const coco_labels = [
       'person','bicycle','car','motorcycle','airplane','bus','train','truck','boat','traffic light',
@@ -246,6 +247,10 @@
             label: coco_labels[class_id] || `class${class_id}`
           });
         }
+        // Only keep the top-N highest confidence boxes (N=10 here, tune as needed)
+        detections.sort((a, b) => b.score - a.score);
+        detections = detections.slice(0, MAX_DETECTIONS || 10);
+
 
         // === Detection Memory logic ===
         detectionMemory.forEach(mem => mem.seen = false);
