@@ -12,7 +12,7 @@
   </style>
 </head>
 <body>
-  <h2>YOLOv12 ONNX Browser Webcam Demo (nms=True, letterbox-correct, real-time)</h2>
+  <h2>YOLOv12 ONNX Browser Webcam Demo (WebGPU optimized, nms=True, letterbox-correct, real-time)</h2>
   <div class="controls">
     <label>Webcam:
       <select id="webcam-select"></select>
@@ -201,17 +201,31 @@
     populateWebcams();
     navigator.mediaDevices?.addEventListener?.('devicechange', populateWebcams);
 
-    // === AUTO-LOAD ONNX MODEL FROM RELATIVE PATH ===
+    // === AUTO-LOAD ONNX MODEL FROM RELATIVE PATH WITH WEBGPU SUPPORT ===
     (async () => {
       outputDiv.innerText = "Loading model yolo12nms.onnx...";
-      const resp = await fetch('yolo12nms.onnx');
-      if (!resp.ok) {
-        outputDiv.innerText = "Failed to fetch yolo12nms.onnx!";
-        return;
+
+      // Tuning for mobile/Quest: 1 thread and force WebGPU if available
+      ort.env.wasm.numThreads = 1;
+      ort.env.webgpu = ort.env.webgpu || {};
+      ort.env.webgpu.enabled = true;
+
+      // Select the best execution provider
+      let ep = 'wasm';
+      if ('gpu' in navigator) ep = 'webgpu'; // WebGPU supported in browser
+
+      try {
+        const resp = await fetch('yolo12nms.onnx');
+        if (!resp.ok) {
+          outputDiv.innerText = "Failed to fetch yolo12nms.onnx!";
+          return;
+        }
+        const buffer = await resp.arrayBuffer();
+        session = await ort.InferenceSession.create(buffer, { executionProviders: [ep] });
+        outputDiv.innerText = "ONNX model loaded! Provider: " + ep.toUpperCase();
+      } catch (err) {
+        outputDiv.innerText = "Model load error: " + err;
       }
-      const buffer = await resp.arrayBuffer();
-      session = await ort.InferenceSession.create(buffer, {executionProviders: ['wasm']});
-      outputDiv.innerText = "ONNX model loaded!";
     })();
   </script>
 </body>
