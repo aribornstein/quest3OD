@@ -106,6 +106,7 @@
 
     // Simple Hungarian for assignment (as above)
     function hungarianAlgorithm(costMatrix) {
+      if (!costMatrix.length || !costMatrix[0].length) return [];
       let n = costMatrix.length;
       let m = costMatrix[0].length;
       let size = Math.max(n, m);
