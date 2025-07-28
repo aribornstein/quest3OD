@@ -193,6 +193,7 @@
         this.vw = nw - this.w; this.vh = nh - this.h; this.P *= (1 - K);
       }
     }
+    // ====== Track class with lost/refound flag and debug logging ======
     class Track {
       constructor(id, detection) {
         const [x, y, w, h] = Track.toXYWH(detection.box);
@@ -202,6 +203,7 @@
         this.box = detection.box; this.label = detection.label;
         this.score = detection.score; this.class = detection.class;
         this.embedding = detection.embedding || null;
+        this.wasLost = false; // Track loss state
       }
       static toXYWH([x1, y1, x2, y2]) { return [(x1 + x2) / 2, (y1 + y2) / 2, x2 - x1, y2 - y1]; }
       static toXYXY([x, y, w, h]) { return [x - w / 2, y - h / 2, x + w / 2, y + h / 2]; }
@@ -211,15 +213,34 @@
         this.kf.update(x, y, w, h); this.box = detection.box;
         this.label = detection.label; this.score = detection.score; this.class = detection.class;
         this.embedding = detection.embedding || null; this.missed = 0; this.age += 1;
+        // If refound, log
+        if (this.wasLost) {
+          this.wasLost = false;
+          console.log(`[TRACK REFOUND] Track ID:${this.id} ${this.label}`);
+        }
       }
-      markMissed() { this.missed += 1; this.age += 1; }
+      markMissed() {
+        this.missed += 1; this.age += 1;
+        if (!this.wasLost) {
+          this.wasLost = true;
+          console.log(`[TRACK LOST] Track ID:${this.id} ${this.label}`);
+        }
+      }
     }
+
+    // ====== SOTA_KalmanTracker with logging on lost/created tracks ======
     class SOTA_KalmanTracker {
       constructor({ iouThresh = 0.3, maxMissed = 6, minHits = 1 } = {}) {
         this.tracks = []; this.nextId = 1;
         this.iouThresh = iouThresh; this.maxMissed = maxMissed; this.minHits = minHits;
       }
       update(detections) {
+        // Defensive: Handle no detections gracefully
+        if (!detections || detections.length === 0) {
+          this.tracks.forEach(track => track.markMissed());
+          this.tracks = this.tracks.filter(track => track.missed <= this.maxMissed);
+          return this.tracks.filter(t => t.age >= this.minHits || t.missed < 1);
+        }
         this.tracks.forEach(t => t.predict());
         let costMatrix = this.tracks.map(track =>
           detections.map(det => 1 - boxIoU(track.box, det.box))
@@ -235,9 +256,22 @@
             }
           }
         });
-        this.tracks.forEach((track, tIdx) => { if (!assignedTracks.has(tIdx)) track.markMissed(); });
+        this.tracks.forEach((track, tIdx) => {
+          if (!assignedTracks.has(tIdx)) track.markMissed();
+        });
+        // Clean up lost tracks
+        const beforeCount = this.tracks.length;
         this.tracks = this.tracks.filter(track => track.missed <= this.maxMissed);
-        detections.forEach((det, dIdx) => { if (!assignedDets.has(dIdx)) this.tracks.push(new Track(this.nextId++, det)); });
+        if (this.tracks.length < beforeCount) {
+          console.log(`[TRACK REMOVED] ${beforeCount - this.tracks.length} track(s) removed (missed too long)`);
+        }
+        // Add new tracks
+        detections.forEach((det, dIdx) => {
+          if (!assignedDets.has(dIdx)) {
+            console.log(`[NEW TRACK] ID:${this.nextId} ${det.label}`);
+            this.tracks.push(new Track(this.nextId++, det));
+          }
+        });
         return this.tracks.filter(t => t.age >= this.minHits || t.missed < 1);
       }
     }
@@ -348,8 +382,19 @@
 
         async function detectAndEmbed(video, session, mobilenetSession, inputSize) {
           const { floatArray, imgForDraw } = await getTensorFromVideo(video, inputSize);
+          // Defensive: Skip ONNX if input is not valid
+          if (!floatArray || floatArray.length === 0) {
+            console.log('[WARN] detectAndEmbed: No input image data');
+            return { detections: [], imgForDraw };
+          }
           const feeds = {}; feeds[session.inputNames[0]] = new ort.Tensor('float32', floatArray, [1, 3, inputSize, inputSize]);
-          const results = await session.run(feeds);
+          let results;
+          try {
+            results = await session.run(feeds);
+          } catch (err) {
+            console.log('[ERROR] ONNX session.run failed:', err);
+            return { detections: [], imgForDraw };
+          }
           const output = results[session.outputNames[0]];
           let dets = output.data, detections = [];
           for (let i = 0; i < dets.length; i += 6) {
@@ -364,6 +409,7 @@
           detections.sort((a, b) => b.score - a.score);
           detections = detections.slice(0, MAX_DETECTIONS);
           if (!detections || detections.length === 0) {
+            console.log('[INFO] detectAndEmbed: No objects detected in frame');
             outputDiv.innerText = "No objects detected.";
             const ctx = canvas.getContext('2d');
             ctx.clearRect(0, 0, canvas.width, canvas.height);
