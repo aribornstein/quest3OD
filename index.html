@@ -63,7 +63,6 @@
   <script>
     // ===== Settings =====
     const INPUT_SIZE = 320;
-    const MOBILENET_SIZE = 224;
     const FRAME_SKIP = 2;
     const MAX_DETECTIONS = 5;
     // Focal length (in px) and baseline (in meters) for stereo depth
@@ -86,7 +85,7 @@
     const video2 = document.getElementById('video2');
     const canvas = document.getElementById('canvas');
     const outputDiv = document.getElementById('output');
-    let session = null, mobilenetSession = null, inferenceInProgress = false;
+    let session = null, inferenceInProgress = false;
     let animFrame = null, frameId = 0, realtime = false;
     let lastOutputText = "";
 
@@ -325,15 +324,8 @@
       x2 = Math.min(iw, (x2 - dw) / r); y2 = Math.min(ih, (y2 - dh) / r);
       return [x1, y1, x2, y2];
     }
-    function cosineSimilarity(a, b) {
-      let dot = 0, normA = 0, normB = 0;
-      for (let i = 0; i < a.length; ++i) {
-        dot += a[i] * b[i]; normA += a[i] * a[i]; normB += b[i] * b[i];
-      }
-      return dot / (Math.sqrt(normA) * Math.sqrt(normB) + 1e-8);
-    }
 
-    // ===== Detection, Embedding, Drawing, Stereo =====
+    // ===== Detection, Drawing, Stereo =====
     async function runRealtimeStereoOrMono() {
       if (inferenceInProgress) {
         animFrame = requestAnimationFrame(runRealtimeStereoOrMono);
@@ -347,7 +339,6 @@
           outputDiv.innerText = "Start the camera(s) first!"; 
           return; 
         }
-        // Add this check for camera readiness
         if (!video1.videoWidth || !video1.videoHeight) {
           outputDiv.innerText = "Camera not ready, please wait…";
           animFrame = requestAnimationFrame(runRealtimeStereoOrMono);
@@ -385,56 +376,12 @@
           return { floatArray, imgForDraw: img };
         }
 
-        async function getMobileNetEmbedding(video, box, mobilenetSession) {
-          const [x1, y1, x2, y2] = box.map(Math.round);
-          const cropW = Math.max(1, x2 - x1), cropH = Math.max(1, y2 - y1);
-          const cropCanvas = document.createElement('canvas');
-          cropCanvas.width = MOBILENET_SIZE; cropCanvas.height = MOBILENET_SIZE;
-          const ctx = cropCanvas.getContext('2d');
-          ctx.drawImage(video, x1, y1, cropW, cropH, 0, 0, MOBILENET_SIZE, MOBILENET_SIZE);
-          const imgData = ctx.getImageData(0, 0, MOBILENET_SIZE, MOBILENET_SIZE).data;
-          const floatArray = new Float32Array(MOBILENET_SIZE * MOBILENET_SIZE * 3);
-          for (let i = 0; i < MOBILENET_SIZE * MOBILENET_SIZE; ++i) {
-            floatArray[i] = imgData[i * 4] / 255.0;
-            floatArray[MOBILENET_SIZE * MOBILENET_SIZE + i] = imgData[i * 4 + 1] / 255.0;
-            floatArray[2 * MOBILENET_SIZE * MOBILENET_SIZE + i] = imgData[i * 4 + 2] / 255.0;
-          }
-          const tensor = new ort.Tensor('float32', floatArray, [1, 3, MOBILENET_SIZE, MOBILENET_SIZE]);
-          const feeds = {}; feeds[mobilenetSession.inputNames[0]] = tensor;
-          const results = await mobilenetSession.run(feeds);
-          const output = results[Object.keys(results)[0]].data;
-          const norm = Math.sqrt(output.reduce((s, v) => s + v * v, 0));
-          return output.map(v => v / norm);
-        }
-
-        function scaleCoords(modelSize, imgSize, coords) {
-          const [iw, ih] = imgSize, [mw, mh] = [modelSize, modelSize];
-          const r = Math.min(mw / iw, mh / ih);
-          const newUnpad = [Math.round(iw * r), Math.round(ih * r)];
-          const dw = (mw - newUnpad[0]) / 2, dh = (mh - newUnpad[1]) / 2;
-          let [x1, y1, x2, y2] = coords;
-          x1 = Math.max(0, (x1 - dw) / r); y1 = Math.max(0, (y1 - dh) / r);
-          x2 = Math.min(iw, (x2 - dw) / r); y2 = Math.min(ih, (y2 - dh) / r);
-          return [x1, y1, x2, y2];
-        }
-
-        function cosineSimilarity(a, b) {
-          let dot = 0, normA = 0, normB = 0;
-          for (let i = 0; i < a.length; ++i) {
-            dot += a[i] * b[i]; normA += a[i] * a[i]; normB += b[i] * b[i];
-          }
-          return dot / (Math.sqrt(normA) * Math.sqrt(normB) + 1e-8);
-        }
-
-        async function detectAndEmbed(video, session, mobilenetSession, inputSize) {
+        async function detect(video, session, inputSize) {
           const { floatArray, imgForDraw } = await getTensorFromVideo(video, inputSize);
-          // Defensive: Skip ONNX if input is not valid
           if (!floatArray || floatArray.length === 0) {
-            // No frame/tensor to run on, return empty
             return { detections: [], imgForDraw };
           }
 
-          // Create feeds object before ONNX call
           const feeds = {};
           feeds[session.inputNames[0]] = new ort.Tensor('float32', floatArray, [1, 3, inputSize, inputSize]);
 
@@ -458,32 +405,26 @@
           }
           detections.sort((a, b) => b.score - a.score);
           detections = detections.slice(0, MAX_DETECTIONS);
-          if (!detections || detections.length === 0) {
-            // No objects, return early (NO downstream ONNX/NMS/embedding calls)
-            return { detections: [], imgForDraw };
-          }
-          // If you embed, only loop if detections is non-empty
-          if (mobilenetSession && detections.length > 0) {
-            for (let det of detections) det.embedding = await getMobileNetEmbedding(video, det.box, mobilenetSession);
-          }
           return { detections, imgForDraw };
         }
 
-        const { detections: detections1, imgForDraw } = await detectAndEmbed(video1, session, mobilenetSession, INPUT_SIZE);
+        const { detections: detections1, imgForDraw } = await detect(video1, session, INPUT_SIZE);
         const tracks = tracker.update(detections1);
 
+        // Depth calculation: match by class and IOU (not embedding)
         let depthMap = {};
         if (useStereo) {
-          const { detections: detections2 } = await detectAndEmbed(video2, session, mobilenetSession, INPUT_SIZE);
+          const { detections: detections2 } = await detect(video2, session, INPUT_SIZE);
           for (let t of tracks) {
-            if (!t.embedding) continue;
-            let bestDet2 = null, bestSim = -1;
+            // Find best match in the second camera by class and IoU
+            let bestDet2 = null, bestIoU = -1;
             for (let d2 of detections2) {
-              if (!d2.embedding) continue;
-              let sim = cosineSimilarity(t.embedding, d2.embedding);
-              if (sim > bestSim) { bestSim = sim; bestDet2 = d2; }
+              if (t.class === d2.class) {
+                let iou = boxIoU(t.box, d2.box);
+                if (iou > bestIoU) { bestIoU = iou; bestDet2 = d2; }
+              }
             }
-            if (bestDet2 && bestSim > 0.7) {
+            if (bestDet2 && bestIoU > 0.3) {
               const [x1, , x2,] = t.box;
               const [xr1, , xr2,] = bestDet2.box;
               const xc1 = (x1 + x2) / 2, xc2 = (xr1 + xr2) / 2;
@@ -531,7 +472,7 @@
         ctx.strokeStyle = color; ctx.fillStyle = color;
         ctx.globalAlpha = track.missed > 0 ? 0.10 : 0.18;
         ctx.fillRect(xx1, yy1, xx2 - xx1, yy2 - yy1);
-        ctx.globalAlpha = 1; ctx.strokeRect(xx1, yy1, xx2 - xx1, yy2 - yy1);
+        ctx.globalAlpha = 1; ctx.strokeRect(xx1, yy1, xx2 - xx1, yy2 - yy2);
         ctx.fillStyle = "#222";
         let labelText = `ID:${track.id} ${track.label} ${(track.score * 100).toFixed(1)}%`;
         if (depthMap[track.id]) labelText += ` Depth: ${depthMap[track.id].toFixed(2)}m`;
@@ -541,7 +482,7 @@
       });
     }
 
-    // ===== Load YOLOv12 and MobileNetV3-Large-Quantized =====
+    // ===== Load YOLOv12 (NO MobileNet) =====
     (async () => {
       outputDiv.innerText = "Loading YOLOv12 ONNX...";
       ort.env.wasm.numThreads = 1;
@@ -554,14 +495,6 @@
         session = await ort.InferenceSession.create(buffer, { executionProviders: [ep] });
         outputDiv.innerText = "YOLOv12 loaded!";
       } catch (err) { outputDiv.innerText = "YOLO model load error: " + err; }
-      outputDiv.innerText += "\nLoading MobileNetV3-Large-Q...";
-      try {
-        const resp = await fetch('MobileNet-v3-Large.onnx');
-        if (!resp.ok) { outputDiv.innerText += "\nFailed to fetch MobileNetV3!"; return; }
-        const buffer = await resp.arrayBuffer();
-        mobilenetSession = await ort.InferenceSession.create(buffer, { executionProviders: [ep] });
-        outputDiv.innerText += "\nMobileNetV3-Large loaded!";
-      } catch (err) { outputDiv.innerText += "\nMobileNetV3 load error: " + err; }
     })();
   </script>
 </body>
