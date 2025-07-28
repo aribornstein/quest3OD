@@ -1,17 +1,42 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
   <meta charset="UTF-8">
   <title>YOLOv12 Stereo Depth AR Demo (MobileNetV3)</title>
   <style>
-    body { font-family: Arial, sans-serif; padding: 2rem; }
-    canvas { border: 1px solid #333; margin-top: 12px; max-width: 100%; }
-    video { border: 1px solid #888; margin-top:8px; max-width:100%; display:none; }
-    .controls { margin-bottom: 16px; }
-    #output { margin-top: 16px; }
-    label { margin-right: 1em; }
+    body {
+      font-family: Arial, sans-serif;
+      padding: 2rem;
+    }
+
+    canvas {
+      border: 1px solid #333;
+      margin-top: 12px;
+      max-width: 100%;
+    }
+
+    video {
+      border: 1px solid #888;
+      margin-top: 8px;
+      max-width: 100%;
+      display: none;
+    }
+
+    .controls {
+      margin-bottom: 16px;
+    }
+
+    #output {
+      margin-top: 16px;
+    }
+
+    label {
+      margin-right: 1em;
+    }
   </style>
 </head>
+
 <body>
   <h2>YOLOv12 Stereo Depth AR Demo (MobileNetV3-Large Quantized)</h2>
   <div class="controls">
@@ -21,11 +46,14 @@
     </label>
     <label>
       Camera 2:
-      <select id="camera-select-2"><option value="">(none)</option></select>
+      <select id="camera-select-2">
+        <option value="">(none)</option>
+      </select>
     </label>
     <button id="start-cameras">Start Camera(s)</button>
     <button id="run-realtime">Run Realtime</button>
-    <label>Conf: <input id="conf-thresh" type="number" value="0.7" step="0.01" min="0" max="1" style="width:3em"></label>
+    <label>Conf: <input id="conf-thresh" type="number" value="0.7" step="0.01" min="0" max="1"
+        style="width:3em"></label>
   </div>
   <video id="video1" width="640" height="480" autoplay playsinline></video>
   <video id="video2" width="640" height="480" autoplay playsinline></video>
@@ -43,13 +71,13 @@
 
     // ===== COCO Labels =====
     const coco_labels = [
-      'person','bicycle','car','motorcycle','airplane','bus','train','truck','boat','traffic light',
-      'fire hydrant','stop sign','parking meter','bench','bird','cat','dog','horse','sheep','cow',
-      'elephant','bear','zebra','giraffe','backpack','umbrella','handbag','tie','suitcase','frisbee',
-      'skis','snowboard','sports ball','kite','baseball bat','baseball glove','skateboard','surfboard','tennis racket','bottle',
-      'wine glass','cup','fork','knife','spoon','bowl','banana','apple','sandwich','orange','broccoli','carrot','hot dog','pizza',
-      'donut','cake','chair','couch','potted plant','bed','dining table','toilet','tv','laptop','mouse','remote','keyboard','cell phone',
-      'microwave','oven','toaster','sink','refrigerator','book','clock','vase','scissors','teddy bear','hair drier','toothbrush'
+      'person', 'bicycle', 'car', 'motorcycle', 'airplane', 'bus', 'train', 'truck', 'boat', 'traffic light',
+      'fire hydrant', 'stop sign', 'parking meter', 'bench', 'bird', 'cat', 'dog', 'horse', 'sheep', 'cow',
+      'elephant', 'bear', 'zebra', 'giraffe', 'backpack', 'umbrella', 'handbag', 'tie', 'suitcase', 'frisbee',
+      'skis', 'snowboard', 'sports ball', 'kite', 'baseball bat', 'baseball glove', 'skateboard', 'surfboard', 'tennis racket', 'bottle',
+      'wine glass', 'cup', 'fork', 'knife', 'spoon', 'bowl', 'banana', 'apple', 'sandwich', 'orange', 'broccoli', 'carrot', 'hot dog', 'pizza',
+      'donut', 'cake', 'chair', 'couch', 'potted plant', 'bed', 'dining table', 'toilet', 'tv', 'laptop', 'mouse', 'remote', 'keyboard', 'cell phone',
+      'microwave', 'oven', 'toaster', 'sink', 'refrigerator', 'book', 'clock', 'vase', 'scissors', 'teddy bear', 'hair drier', 'toothbrush'
     ];
 
     // ===== DOM refs =====
@@ -58,7 +86,7 @@
     const video2 = document.getElementById('video2');
     const canvas = document.getElementById('canvas');
     const outputDiv = document.getElementById('output');
-    let session = null, mobilenetSession = null;
+    let session = null, mobilenetSession = null, inferenceInProgress = false;
     let animFrame = null, frameId = 0, realtime = false;
     let lastOutputText = "";
 
@@ -73,7 +101,7 @@
       videoInputs.forEach((dev, idx) => {
         const opt1 = document.createElement('option');
         opt1.value = dev.deviceId;
-        opt1.text = dev.label || `Camera ${idx+1}`;
+        opt1.text = dev.label || `Camera ${idx + 1}`;
         sel1.appendChild(opt1);
         const opt2 = opt1.cloneNode(true);
         sel2.appendChild(opt2);
@@ -120,8 +148,8 @@
     function hungarianAlgorithm(costMatrix) {
       if (!costMatrix.length || !costMatrix[0].length) return [];
       let n = costMatrix.length, m = costMatrix[0].length, size = Math.max(n, m);
-      let cost = Array.from({length: size}, (_, i) =>
-        Array.from({length: size}, (_, j) => (i < n && j < m) ? costMatrix[i][j] : 10000)
+      let cost = Array.from({ length: size }, (_, i) =>
+        Array.from({ length: size }, (_, j) => (i < n && j < m) ? costMatrix[i][j] : 10000)
       );
       for (let i = 0; i < size; ++i) {
         let minVal = Math.min(...cost[i]);
@@ -176,7 +204,7 @@
         this.embedding = detection.embedding || null;
       }
       static toXYWH([x1, y1, x2, y2]) { return [(x1 + x2) / 2, (y1 + y2) / 2, x2 - x1, y2 - y1]; }
-      static toXYXY([x, y, w, h]) { return [x - w/2, y - h/2, x + w/2, y + h/2]; }
+      static toXYXY([x, y, w, h]) { return [x - w / 2, y - h / 2, x + w / 2, y + h / 2]; }
       predict() { const [x, y, w, h] = this.kf.predict(); this.box = Track.toXYXY([x, y, w, h]); return this.box; }
       update(detection) {
         const [x, y, w, h] = Track.toXYWH(detection.box);
@@ -187,7 +215,7 @@
       markMissed() { this.missed += 1; this.age += 1; }
     }
     class SOTA_KalmanTracker {
-      constructor({iouThresh=0.3, maxMissed=6, minHits=1} = {}) {
+      constructor({ iouThresh = 0.3, maxMissed = 6, minHits = 1 } = {}) {
         this.tracks = []; this.nextId = 1;
         this.iouThresh = iouThresh; this.maxMissed = maxMissed; this.minHits = minHits;
       }
@@ -227,165 +255,196 @@
       return [x1, y1, x2, y2];
     }
     function cosineSimilarity(a, b) {
-      let dot=0, normA=0, normB=0;
-      for (let i=0; i<a.length; ++i) {
-        dot += a[i]*b[i]; normA += a[i]*a[i]; normB += b[i]*b[i];
+      let dot = 0, normA = 0, normB = 0;
+      for (let i = 0; i < a.length; ++i) {
+        dot += a[i] * b[i]; normA += a[i] * a[i]; normB += b[i] * b[i];
       }
-      return dot / (Math.sqrt(normA)*Math.sqrt(normB)+1e-8);
+      return dot / (Math.sqrt(normA) * Math.sqrt(normB) + 1e-8);
     }
 
     // ===== Detection, Embedding, Drawing, Stereo =====
     async function runRealtimeStereoOrMono() {
-      if (!realtime) return;
-      if (!video1.srcObject) { outputDiv.innerText = "Start the camera(s) first!"; return; }
-      if (!session) { outputDiv.innerText = "Model not loaded!"; return; }
-      const useStereo = video2.srcObject && document.getElementById('camera-select-2').value && video2.readyState === 4;
-      if ((++frameId % FRAME_SKIP) !== 0) return animFrame = requestAnimationFrame(runRealtimeStereoOrMono);
-
-      async function getTensorFromVideo(video, inputSize) {
-        const tmp = document.createElement('canvas');
-        tmp.width = video.videoWidth; tmp.height = video.videoHeight;
-        tmp.getContext('2d').drawImage(video, 0, 0, tmp.width, tmp.height);
-        const img = new Image(); img.src = tmp.toDataURL();
-        await new Promise(res => img.onload = res);
-        const canvas2 = document.createElement('canvas');
-        canvas2.width = inputSize; canvas2.height = inputSize;
-        const ctx = canvas2.getContext('2d');
-        ctx.fillStyle = "#808080"; ctx.fillRect(0,0,inputSize,inputSize);
-        const [iw, ih] = [img.naturalWidth || img.width, img.naturalHeight || img.height];
-        const r = Math.min(inputSize/iw, inputSize/ih);
-        const newW = Math.round(iw*r), newH = Math.round(ih*r);
-        const dx = Math.floor((inputSize - newW)/2), dy = Math.floor((inputSize - newH)/2);
-        ctx.drawImage(img, dx, dy, newW, newH);
-        const imageData = ctx.getImageData(0, 0, inputSize, inputSize).data;
-        const floatArray = new Float32Array(inputSize*inputSize*3);
-        for (let i=0; i<inputSize*inputSize; ++i) {
-          floatArray[i] = imageData[i*4]/255.0;
-          floatArray[inputSize*inputSize+i] = imageData[i*4+1]/255.0;
-          floatArray[2*inputSize*inputSize+i] = imageData[i*4+2]/255.0;
-        }
-        return { floatArray, imgForDraw: img };
+      if (inferenceInProgress) {
+        animFrame = requestAnimationFrame(runRealtimeStereoOrMono);
+        return;
       }
+      inferenceInProgress = true;
 
-      async function getMobileNetEmbedding(video, box, mobilenetSession) {
-        const [x1, y1, x2, y2] = box.map(Math.round);
-        const cropW = Math.max(1, x2 - x1), cropH = Math.max(1, y2 - y1);
-        const cropCanvas = document.createElement('canvas');
-        cropCanvas.width = MOBILENET_SIZE; cropCanvas.height = MOBILENET_SIZE;
-        const ctx = cropCanvas.getContext('2d');
-        ctx.drawImage(video, x1, y1, cropW, cropH, 0, 0, MOBILENET_SIZE, MOBILENET_SIZE);
-        const imgData = ctx.getImageData(0, 0, MOBILENET_SIZE, MOBILENET_SIZE).data;
-        const floatArray = new Float32Array(MOBILENET_SIZE*MOBILENET_SIZE*3);
-        for (let i = 0; i < MOBILENET_SIZE*MOBILENET_SIZE; ++i) {
-          floatArray[i] = imgData[i*4] / 255.0;
-          floatArray[MOBILENET_SIZE*MOBILENET_SIZE + i] = imgData[i*4 + 1] / 255.0;
-          floatArray[2*MOBILENET_SIZE*MOBILENET_SIZE + i] = imgData[i*4 + 2] / 255.0;
-        }
-        const tensor = new ort.Tensor('float32', floatArray, [1,3,MOBILENET_SIZE,MOBILENET_SIZE]);
-        const feeds = {}; feeds[mobilenetSession.inputNames[0]] = tensor;
-        const results = await mobilenetSession.run(feeds);
-        const output = results[Object.keys(results)[0]].data;
-        // Use as feature vector
-        const norm = Math.sqrt(output.reduce((s,v)=>s+v*v,0));
-        return output.map(v => v/norm);
-      }
-
-      async function detectAndEmbed(video, session, mobilenetSession, inputSize) {
-        const { floatArray, imgForDraw } = await getTensorFromVideo(video, inputSize);
-        const feeds = {}; feeds[session.inputNames[0]] = new ort.Tensor('float32', floatArray, [1,3,inputSize,inputSize]);
-        const results = await session.run(feeds);
-        const output = results[session.outputNames[0]];
-        let dets = output.data, detections = [];
-        for (let i=0; i<dets.length; i+=6) {
-          const x1 = dets[i], y1 = dets[i+1], x2 = dets[i+2], y2 = dets[i+3], score = dets[i+4], class_id = dets[i+5];
-          if (score < parseFloat(document.getElementById('conf-thresh').value)) continue;
-          detections.push({
-            box: scaleCoords(INPUT_SIZE, [video.videoWidth, video.videoHeight], [x1, y1, x2, y2]),
-            score, class: class_id,
-            label: coco_labels[class_id] || `class${class_id}`
-          });
-        }
-        detections.sort((a,b) => b.score - a.score);
-        detections = detections.slice(0, MAX_DETECTIONS);
-        if (!detections || detections.length === 0) {
-          // No detections: skip embedding and tracking!
-          outputDiv.innerText = "No objects detected.";
-          // Optionally clear the canvas (so the boxes disappear)
-          const ctx = canvas.getContext('2d');
-          ctx.clearRect(0, 0, canvas.width, canvas.height);
+      try {
+        if (!realtime) return;
+        if (!video1.srcObject) { outputDiv.innerText = "Start the camera(s) first!"; return; }
+        if (!session) { outputDiv.innerText = "Model not loaded!"; return; }
+        const useStereo = video2.srcObject && document.getElementById('camera-select-2').value && video2.readyState === 4;
+        if ((++frameId % FRAME_SKIP) !== 0) {
           animFrame = requestAnimationFrame(runRealtimeStereoOrMono);
-          return { detections: [], imgForDraw };
+          return;
         }
 
-        if (mobilenetSession) {
-          for (let det of detections) det.embedding = await getMobileNetEmbedding(video, det.box, mobilenetSession);
-        }
-        return { detections, imgForDraw };
-      }
-
-      const { detections: detections1, imgForDraw } = await detectAndEmbed(video1, session, mobilenetSession, INPUT_SIZE);
-      const tracks = tracker.update(detections1);
-
-      let depthMap = {};
-      if (useStereo) {
-        const { detections: detections2 } = await detectAndEmbed(video2, session, mobilenetSession, INPUT_SIZE);
-        for (let t of tracks) {
-          if (!t.embedding) continue;
-          let bestDet2=null, bestSim=-1;
-          for (let d2 of detections2) {
-            if (!d2.embedding) continue;
-            let sim = cosineSimilarity(t.embedding, d2.embedding);
-            if (sim > bestSim) { bestSim=sim; bestDet2=d2; }
+        async function getTensorFromVideo(video, inputSize) {
+          const tmp = document.createElement('canvas');
+          tmp.width = video.videoWidth; tmp.height = video.videoHeight;
+          tmp.getContext('2d').drawImage(video, 0, 0, tmp.width, tmp.height);
+          const img = new Image(); img.src = tmp.toDataURL();
+          await new Promise(res => img.onload = res);
+          const canvas2 = document.createElement('canvas');
+          canvas2.width = inputSize; canvas2.height = inputSize;
+          const ctx = canvas2.getContext('2d');
+          ctx.fillStyle = "#808080"; ctx.fillRect(0, 0, inputSize, inputSize);
+          const [iw, ih] = [img.naturalWidth || img.width, img.naturalHeight || img.height];
+          const r = Math.min(inputSize / iw, inputSize / ih);
+          const newW = Math.round(iw * r), newH = Math.round(ih * r);
+          const dx = Math.floor((inputSize - newW) / 2), dy = Math.floor((inputSize - newH) / 2);
+          ctx.drawImage(img, dx, dy, newW, newH);
+          const imageData = ctx.getImageData(0, 0, inputSize, inputSize).data;
+          const floatArray = new Float32Array(inputSize * inputSize * 3);
+          for (let i = 0; i < inputSize * inputSize; ++i) {
+            floatArray[i] = imageData[i * 4] / 255.0;
+            floatArray[inputSize * inputSize + i] = imageData[i * 4 + 1] / 255.0;
+            floatArray[2 * inputSize * inputSize + i] = imageData[i * 4 + 2] / 255.0;
           }
-          if (bestDet2 && bestSim>0.7) {
-            const [x1, , x2, ] = t.box;
-            const [xr1, , xr2, ] = bestDet2.box;
-            const xc1 = (x1 + x2)/2, xc2 = (xr1 + xr2)/2;
-            let disparity = Math.abs(xc1 - xc2);
-            let depth = (F * B) / (disparity + 1e-6);
-            depthMap[t.id] = depth;
+          return { floatArray, imgForDraw: img };
+        }
+
+        async function getMobileNetEmbedding(video, box, mobilenetSession) {
+          const [x1, y1, x2, y2] = box.map(Math.round);
+          const cropW = Math.max(1, x2 - x1), cropH = Math.max(1, y2 - y1);
+          const cropCanvas = document.createElement('canvas');
+          cropCanvas.width = MOBILENET_SIZE; cropCanvas.height = MOBILENET_SIZE;
+          const ctx = cropCanvas.getContext('2d');
+          ctx.drawImage(video, x1, y1, cropW, cropH, 0, 0, MOBILENET_SIZE, MOBILENET_SIZE);
+          const imgData = ctx.getImageData(0, 0, MOBILENET_SIZE, MOBILENET_SIZE).data;
+          const floatArray = new Float32Array(MOBILENET_SIZE * MOBILENET_SIZE * 3);
+          for (let i = 0; i < MOBILENET_SIZE * MOBILENET_SIZE; ++i) {
+            floatArray[i] = imgData[i * 4] / 255.0;
+            floatArray[MOBILENET_SIZE * MOBILENET_SIZE + i] = imgData[i * 4 + 1] / 255.0;
+            floatArray[2 * MOBILENET_SIZE * MOBILENET_SIZE + i] = imgData[i * 4 + 2] / 255.0;
+          }
+          const tensor = new ort.Tensor('float32', floatArray, [1, 3, MOBILENET_SIZE, MOBILENET_SIZE]);
+          const feeds = {}; feeds[mobilenetSession.inputNames[0]] = tensor;
+          const results = await mobilenetSession.run(feeds);
+          const output = results[Object.keys(results)[0]].data;
+          const norm = Math.sqrt(output.reduce((s, v) => s + v * v, 0));
+          return output.map(v => v / norm);
+        }
+
+        function scaleCoords(modelSize, imgSize, coords) {
+          const [iw, ih] = imgSize, [mw, mh] = [modelSize, modelSize];
+          const r = Math.min(mw / iw, mh / ih);
+          const newUnpad = [Math.round(iw * r), Math.round(ih * r)];
+          const dw = (mw - newUnpad[0]) / 2, dh = (mh - newUnpad[1]) / 2;
+          let [x1, y1, x2, y2] = coords;
+          x1 = Math.max(0, (x1 - dw) / r); y1 = Math.max(0, (y1 - dh) / r);
+          x2 = Math.min(iw, (x2 - dw) / r); y2 = Math.min(ih, (y2 - dh) / r);
+          return [x1, y1, x2, y2];
+        }
+
+        function cosineSimilarity(a, b) {
+          let dot = 0, normA = 0, normB = 0;
+          for (let i = 0; i < a.length; ++i) {
+            dot += a[i] * b[i]; normA += a[i] * a[i]; normB += b[i] * b[i];
+          }
+          return dot / (Math.sqrt(normA) * Math.sqrt(normB) + 1e-8);
+        }
+
+        async function detectAndEmbed(video, session, mobilenetSession, inputSize) {
+          const { floatArray, imgForDraw } = await getTensorFromVideo(video, inputSize);
+          const feeds = {}; feeds[session.inputNames[0]] = new ort.Tensor('float32', floatArray, [1, 3, inputSize, inputSize]);
+          const results = await session.run(feeds);
+          const output = results[session.outputNames[0]];
+          let dets = output.data, detections = [];
+          for (let i = 0; i < dets.length; i += 6) {
+            const x1 = dets[i], y1 = dets[i + 1], x2 = dets[i + 2], y2 = dets[i + 3], score = dets[i + 4], class_id = dets[i + 5];
+            if (score < parseFloat(document.getElementById('conf-thresh').value)) continue;
+            detections.push({
+              box: scaleCoords(INPUT_SIZE, [video.videoWidth, video.videoHeight], [x1, y1, x2, y2]),
+              score, class: class_id,
+              label: coco_labels[class_id] || `class${class_id}`
+            });
+          }
+          detections.sort((a, b) => b.score - a.score);
+          detections = detections.slice(0, MAX_DETECTIONS);
+          if (!detections || detections.length === 0) {
+            outputDiv.innerText = "No objects detected.";
+            const ctx = canvas.getContext('2d');
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            animFrame = requestAnimationFrame(runRealtimeStereoOrMono);
+            return { detections: [], imgForDraw };
+          }
+          if (mobilenetSession) {
+            for (let det of detections) det.embedding = await getMobileNetEmbedding(video, det.box, mobilenetSession);
+          }
+          return { detections, imgForDraw };
+        }
+
+        const { detections: detections1, imgForDraw } = await detectAndEmbed(video1, session, mobilenetSession, INPUT_SIZE);
+        const tracks = tracker.update(detections1);
+
+        let depthMap = {};
+        if (useStereo) {
+          const { detections: detections2 } = await detectAndEmbed(video2, session, mobilenetSession, INPUT_SIZE);
+          for (let t of tracks) {
+            if (!t.embedding) continue;
+            let bestDet2 = null, bestSim = -1;
+            for (let d2 of detections2) {
+              if (!d2.embedding) continue;
+              let sim = cosineSimilarity(t.embedding, d2.embedding);
+              if (sim > bestSim) { bestSim = sim; bestDet2 = d2; }
+            }
+            if (bestDet2 && bestSim > 0.7) {
+              const [x1, , x2,] = t.box;
+              const [xr1, , xr2,] = bestDet2.box;
+              const xc1 = (x1 + x2) / 2, xc2 = (xr1 + xr2) / 2;
+              let disparity = Math.abs(xc1 - xc2);
+              let depth = (F * B) / (disparity + 1e-6);
+              depthMap[t.id] = depth;
+            }
           }
         }
-      }
 
-      canvas.width = INPUT_SIZE; canvas.height = INPUT_SIZE;
-      drawBoxesWithDepth(imgForDraw, tracks, canvas, depthMap);
+        canvas.width = INPUT_SIZE; canvas.height = INPUT_SIZE;
+        drawBoxesWithDepth(imgForDraw, tracks, canvas, depthMap);
 
-      let detectionText = tracks.length
-        ? tracks.map(t => `ID:${t.id} ${t.label}: ${(t.score*100).toFixed(1)}%` + (depthMap[t.id] ? ` Depth: ${depthMap[t.id].toFixed(2)}m` : "")).join(', ')
-        : 'No objects detected.';
-      if (detectionText !== lastOutputText) {
-        outputDiv.innerText = detectionText; lastOutputText = detectionText;
+        let detectionText = tracks.length
+          ? tracks.map(t => `ID:${t.id} ${t.label}: ${(t.score * 100).toFixed(1)}%` + (depthMap[t.id] ? ` Depth: ${depthMap[t.id].toFixed(2)}m` : "")).join(', ')
+          : 'No objects detected.';
+        if (detectionText !== lastOutputText) {
+          outputDiv.innerText = detectionText; lastOutputText = detectionText;
+        }
+      } catch (err) {
+        outputDiv.innerText = "Error during inference: " + err;
+      } finally {
+        inferenceInProgress = false;
+        animFrame = requestAnimationFrame(runRealtimeStereoOrMono);
       }
-      animFrame = requestAnimationFrame(runRealtimeStereoOrMono);
     }
-    function drawBoxesWithDepth(origImg, tracks, canvas, depthMap={}) {
+
+    function drawBoxesWithDepth(origImg, tracks, canvas, depthMap = {}) {
       const ctx = canvas.getContext('2d');
-      ctx.clearRect(0,0,canvas.width,canvas.height);
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
       const [iw, ih] = [origImg.naturalWidth || origImg.width, origImg.naturalHeight || origImg.height];
       const [mw, mh] = [canvas.width, canvas.height];
       const r = Math.min(mw / iw, mh / ih);
       const newW = Math.round(iw * r), newH = Math.round(ih * r);
-      const dx = (mw - newW)/2, dy = (mh - newH)/2;
+      const dx = (mw - newW) / 2, dy = (mh - newH) / 2;
       ctx.fillStyle = "#eee";
-      ctx.fillRect(0,0,mw,mh);
+      ctx.fillRect(0, 0, mw, mh);
       ctx.drawImage(origImg, dx, dy, newW, newH);
       ctx.font = "bold 16px Arial"; ctx.lineWidth = 3;
       tracks.forEach(track => {
         const [x1, y1, x2, y2] = track.box;
         const xx1 = x1 * r + dx, yy1 = y1 * r + dy;
         const xx2 = x2 * r + dx, yy2 = y2 * r + dy;
-        const color = track.missed>0 ? "#ffaa00" : "#00ff00";
+        const color = track.missed > 0 ? "#ffaa00" : "#00ff00";
         ctx.strokeStyle = color; ctx.fillStyle = color;
-        ctx.globalAlpha = track.missed>0 ? 0.10 : 0.18;
-        ctx.fillRect(xx1, yy1, xx2-xx1, yy2-yy1);
-        ctx.globalAlpha = 1; ctx.strokeRect(xx1, yy1, xx2-xx1, yy2-yy1);
+        ctx.globalAlpha = track.missed > 0 ? 0.10 : 0.18;
+        ctx.fillRect(xx1, yy1, xx2 - xx1, yy2 - yy1);
+        ctx.globalAlpha = 1; ctx.strokeRect(xx1, yy1, xx2 - xx1, yy2 - yy1);
         ctx.fillStyle = "#222";
-        let labelText = `ID:${track.id} ${track.label} ${(track.score*100).toFixed(1)}%`;
+        let labelText = `ID:${track.id} ${track.label} ${(track.score * 100).toFixed(1)}%`;
         if (depthMap[track.id]) labelText += ` Depth: ${depthMap[track.id].toFixed(2)}m`;
-        ctx.fillRect(xx1, yy1-24, ctx.measureText(labelText).width+20, 22);
+        ctx.fillRect(xx1, yy1 - 24, ctx.measureText(labelText).width + 20, 22);
         ctx.fillStyle = "#fff";
-        ctx.fillText(labelText, xx1+5, yy1 - 7);
+        ctx.fillText(labelText, xx1 + 5, yy1 - 7);
       });
     }
 
@@ -401,7 +460,7 @@
         const buffer = await resp.arrayBuffer();
         session = await ort.InferenceSession.create(buffer, { executionProviders: [ep] });
         outputDiv.innerText = "YOLOv12 loaded!";
-      } catch (err) { outputDiv.innerText = "YOLO model load error: "+err; }
+      } catch (err) { outputDiv.innerText = "YOLO model load error: " + err; }
       outputDiv.innerText += "\nLoading MobileNetV3-Large-Q...";
       try {
         const resp = await fetch('MobileNet-v3-Large.onnx');
@@ -409,8 +468,9 @@
         const buffer = await resp.arrayBuffer();
         mobilenetSession = await ort.InferenceSession.create(buffer, { executionProviders: [ep] });
         outputDiv.innerText += "\nMobileNetV3-Large loaded!";
-      } catch (err) { outputDiv.innerText += "\nMobileNetV3 load error: "+err; }
+      } catch (err) { outputDiv.innerText += "\nMobileNetV3 load error: " + err; }
     })();
   </script>
 </body>
+
 </html>
