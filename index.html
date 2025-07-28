@@ -116,9 +116,21 @@
       const id1 = document.getElementById('camera-select-1').value;
       const id2 = document.getElementById('camera-select-2').value;
 
+      if (!id1) {
+        outputDiv.innerText = "Please select Camera 1.";
+        return;
+      }
+
       try {
-        const constraints1 = { video: { deviceId: { exact: id1 }, width: { ideal: 640 } } };
-        stream1 = await navigator.mediaDevices.getUserMedia(constraints1);
+        let constraints1 = { video: { deviceId: { exact: id1 }, width: { ideal: 640 } } };
+        try {
+          stream1 = await navigator.mediaDevices.getUserMedia(constraints1);
+        } catch (err) {
+          if (err.name === "OverconstrainedError") {
+            constraints1 = { video: { deviceId: { exact: id1 } } };
+            stream1 = await navigator.mediaDevices.getUserMedia(constraints1);
+          } else throw err;
+        }
         video1.srcObject = stream1;
         video1.style.display = 'inline';
       } catch (err) {
@@ -129,8 +141,15 @@
 
       if (id2 && id2 !== id1) {
         try {
-          const constraints2 = { video: { deviceId: { exact: id2 }, width: { ideal: 640 } } };
-          stream2 = await navigator.mediaDevices.getUserMedia(constraints2);
+          let constraints2 = { video: { deviceId: { exact: id2 }, width: { ideal: 640 } } };
+          try {
+            stream2 = await navigator.mediaDevices.getUserMedia(constraints2);
+          } catch (err) {
+            if (err.name === "OverconstrainedError") {
+              constraints2 = { video: { deviceId: { exact: id2 } } };
+              stream2 = await navigator.mediaDevices.getUserMedia(constraints2);
+            } else throw err;
+          }
           video2.srcObject = stream2;
           video2.style.display = 'inline';
         } catch (err) {
