@@ -115,15 +115,33 @@
       if (stream2) stream2.getTracks().forEach(t => t.stop());
       const id1 = document.getElementById('camera-select-1').value;
       const id2 = document.getElementById('camera-select-2').value;
-      const constraints1 = { video: { deviceId: { exact: id1 }, width: { ideal: 640 } } };
-      stream1 = await navigator.mediaDevices.getUserMedia(constraints1);
-      video1.srcObject = stream1; video1.style.display = 'inline';
+
+      try {
+        const constraints1 = { video: { deviceId: { exact: id1 }, width: { ideal: 640 } } };
+        stream1 = await navigator.mediaDevices.getUserMedia(constraints1);
+        video1.srcObject = stream1;
+        video1.style.display = 'inline';
+      } catch (err) {
+        outputDiv.innerText = "Failed to start camera 1: " + (err.name || err.message);
+        console.error(err);
+        return;
+      }
+
       if (id2 && id2 !== id1) {
-        const constraints2 = { video: { deviceId: { exact: id2 }, width: { ideal: 640 } } };
-        stream2 = await navigator.mediaDevices.getUserMedia(constraints2);
-        video2.srcObject = stream2; video2.style.display = 'inline';
+        try {
+          const constraints2 = { video: { deviceId: { exact: id2 }, width: { ideal: 640 } } };
+          stream2 = await navigator.mediaDevices.getUserMedia(constraints2);
+          video2.srcObject = stream2;
+          video2.style.display = 'inline';
+        } catch (err) {
+          outputDiv.innerText = "Failed to start camera 2: " + (err.name || err.message);
+          console.error(err);
+          return;
+        }
       } else {
-        stream2 = null; video2.srcObject = null; video2.style.display = 'none';
+        stream2 = null;
+        video2.srcObject = null;
+        video2.style.display = 'none';
       }
     };
 
@@ -306,7 +324,16 @@
 
       try {
         if (!realtime) return;
-        if (!video1.srcObject) { outputDiv.innerText = "Start the camera(s) first!"; return; }
+        if (!video1.srcObject) { 
+          outputDiv.innerText = "Start the camera(s) first!"; 
+          return; 
+        }
+        // Add this check for camera readiness
+        if (!video1.videoWidth || !video1.videoHeight) {
+          outputDiv.innerText = "Camera not ready, please wait…";
+          animFrame = requestAnimationFrame(runRealtimeStereoOrMono);
+          return;
+        }
         if (!session) { outputDiv.innerText = "Model not loaded!"; return; }
         const useStereo = video2.srcObject && document.getElementById('camera-select-2').value && video2.readyState === 4;
         if ((++frameId % FRAME_SKIP) !== 0) {
@@ -485,7 +512,7 @@
         ctx.strokeStyle = color; ctx.fillStyle = color;
         ctx.globalAlpha = track.missed > 0 ? 0.10 : 0.18;
         ctx.fillRect(xx1, yy1, xx2 - xx1, yy2 - yy1);
-        ctx.globalAlpha = 1; ctx.strokeRect(xx1, yy1, xx2 - xx1, yy2 - yy2);
+        ctx.globalAlpha = 1; ctx.strokeRect(xx1, yy1, xx2 - xx1, yy2 - yy1);
         ctx.fillStyle = "#222";
         let labelText = `ID:${track.id} ${track.label} ${(track.score * 100).toFixed(1)}%`;
         if (depthMap[track.id]) labelText += ` Depth: ${depthMap[track.id].toFixed(2)}m`;
